@@ -3,7 +3,7 @@ services:
     name: egx-radar-api
     runtime: python
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r requirements.txt && flask db upgrade
     startCommand: gunicorn run:app --workers 2 --bind 0.0.0.0:$PORT --timeout 120
     healthCheckPath: /health
     autoDeploy: true
