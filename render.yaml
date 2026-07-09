@@ -4,7 +4,7 @@ services:
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: python -c "from app import create_app, db; app = create_app(); app.app_context().__enter__(); db.create_all(); print('DB tables created')" && gunicorn run:app --workers 2 --bind 0.0.0.0:$PORT --timeout 120
+    startCommand: gunicorn run:app --workers 2 --bind 0.0.0.0:$PORT --timeout 120
     healthCheckPath: /health
     autoDeploy: true
     envVars:
