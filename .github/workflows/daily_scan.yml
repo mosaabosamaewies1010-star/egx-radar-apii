@@ -1,0 +1,41 @@
+name: EGX Daily Scan
+
+on:
+  schedule:
+    # 12:35 UTC = 14:35 Cairo (UTC+2) — 5 min after EGX close
+    - cron: '35 12 * * 0,1,2,3,4'
+  workflow_dispatch:  # allow manual trigger
+
+jobs:
+  trigger-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Trigger daily pipeline
+        id: trigger
+        run: |
+          RESPONSE=$(curl -s -o response.json -w "%{http_code}" \
+            -X POST "${{ secrets.RENDER_API_URL }}/api/admin/trigger-scan" \
+            -H "X-API-Key: ${{ secrets.BOT_API_KEY }}" \
+            -H "Content-Type: application/json")
+          echo "HTTP status: $RESPONSE"
+          cat response.json
+          if [ "$RESPONSE" != "200" ]; then
+            echo "Pipeline trigger failed with status $RESPONSE"
+            exit 1
+          fi
+
+      - name: Wait for pipeline to complete
+        run: sleep 300
+
+      - name: Check health
+        run: |
+          RESPONSE=$(curl -s "${{ secrets.RENDER_API_URL }}/api/admin/health")
+          echo "$RESPONSE"
+          SCORED=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['scanner']['scored_today'])")
+          echo "Stocks scored today: $SCORED"
+          if [ "$SCORED" -eq "0" ]; then
+            echo "WARNING: 0 stocks scored today — scan may have failed"
+            exit 1
+          fi

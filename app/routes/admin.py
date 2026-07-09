@@ -1,9 +1,13 @@
 """
-/api/admin/health  — Internal system monitoring dashboard
-Not exposed to regular users. Returns aggregated metrics for ops use.
+/api/admin/health       — Internal system monitoring dashboard
+/api/admin/trigger-scan — Trigger full daily pipeline (called by GitHub Actions cron)
+Not exposed to regular users.
 """
+import os
+import logging
+import threading
 from datetime import date, timedelta
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request
 from sqlalchemy import func
 
 from app import db
@@ -11,6 +15,7 @@ from app.models.opportunity import Opportunity
 from app.models.score import RadarScoreHistory
 from app.models.regime import MarketRegimeHistory
 
+logger = logging.getLogger(__name__)
 admin_bp = Blueprint("admin", __name__)
 
 
@@ -142,4 +147,54 @@ def system_health():
             "scan_days_7d": scored_week,
         },
         "regime": regime_info,
+    })
+
+
+def _run_pipeline(app):
+    """Run the full daily pipeline in a background thread."""
+    results = {}
+    try:
+        from app.jobs.regime_job import run_regime_job
+        run_regime_job(app)
+        results["regime_job"] = "ok"
+    except Exception as e:
+        results["regime_job"] = f"error: {e}"
+        logger.exception("trigger-scan: regime_job failed")
+
+    try:
+        from app.jobs.daily_scan import run_daily_scan
+        run_daily_scan(app)
+        results["daily_scan"] = "ok"
+    except Exception as e:
+        results["daily_scan"] = f"error: {e}"
+        logger.exception("trigger-scan: daily_scan failed")
+
+    try:
+        from app.jobs.outcome_job import run_outcome_job
+        run_outcome_job(app)
+        results["outcome_job"] = "ok"
+    except Exception as e:
+        results["outcome_job"] = f"error: {e}"
+        logger.exception("trigger-scan: outcome_job failed")
+
+    logger.info("trigger-scan: pipeline complete — %s", results)
+
+
+@admin_bp.post("/api/admin/trigger-scan")
+def trigger_scan():
+    """Trigger the full daily pipeline. Protected by BOT_API_KEY."""
+    api_key = request.headers.get("X-API-Key") or request.args.get("api_key")
+    expected = os.getenv("BOT_API_KEY")
+    if not expected or api_key != expected:
+        return jsonify({"error": "unauthorized"}), 401
+
+    from flask import current_app
+    app = current_app._get_current_object()
+    thread = threading.Thread(target=_run_pipeline, args=(app,), daemon=True)
+    thread.start()
+
+    return jsonify({
+        "status": "started",
+        "message": "pipeline running in background",
+        "as_of": date.today().isoformat(),
     })
