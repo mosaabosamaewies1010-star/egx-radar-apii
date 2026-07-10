@@ -1,8 +1,10 @@
 """
 POST /api/analytics/events — ingest batched frontend events.
-Lightweight: validates schema, persists to DB, returns 204.
+GET  /api/analytics/summary — beta telemetry summary for admin dashboard.
 """
+from datetime import datetime, timezone, timedelta
 from flask import Blueprint, request, jsonify
+from sqlalchemy import func
 from app import db
 from app.models.analytics import AnalyticsEvent
 
@@ -15,6 +17,8 @@ ALLOWED_EVENTS = {
     "stock_page_viewed", "score_gauge_viewed", "explain_viewed",
     "opportunity_card_viewed", "error_shown", "retry_clicked",
     "widget_viewed",
+    "pro_upgrade_clicked", "discover_opened", "watchlist_added",
+    "morning_brief_opened", "stock_searched",
 }
 
 MAX_BATCH = 50   # cap per request
@@ -49,3 +53,46 @@ def ingest_events():
         db.session.commit()
 
     return "", 204
+
+
+@analytics_bp.get("/api/analytics/summary")
+def analytics_summary():
+    """Beta telemetry summary — last 7 and 30 days."""
+    now      = datetime.now(timezone.utc)
+    week_ago = now - timedelta(days=7)
+    month_ago = now - timedelta(days=30)
+
+    def count_event(name, since):
+        return db.session.query(func.count(AnalyticsEvent.id)).filter(
+            AnalyticsEvent.name == name,
+            AnalyticsEvent.received_at >= since,
+        ).scalar() or 0
+
+    def top_symbols(since, limit=10):
+        rows = (
+            db.session.query(AnalyticsEvent.symbol, func.count(AnalyticsEvent.id).label("n"))
+            .filter(AnalyticsEvent.name == "stock_page_viewed", AnalyticsEvent.symbol.isnot(None), AnalyticsEvent.received_at >= since)
+            .group_by(AnalyticsEvent.symbol)
+            .order_by(func.count(AnalyticsEvent.id).desc())
+            .limit(limit)
+            .all()
+        )
+        return [{"symbol": r.symbol, "views": r.n} for r in rows]
+
+    return jsonify({
+        "7d": {
+            "stock_views":        count_event("stock_page_viewed", week_ago),
+            "discover_opens":     count_event("discover_opened", week_ago),
+            "pro_upgrade_clicks": count_event("pro_upgrade_clicked", week_ago),
+            "searches":           count_event("stock_searched", week_ago),
+            "watchlist_adds":     count_event("watchlist_added", week_ago),
+        },
+        "30d": {
+            "stock_views":        count_event("stock_page_viewed", month_ago),
+            "discover_opens":     count_event("discover_opened", month_ago),
+            "pro_upgrade_clicks": count_event("pro_upgrade_clicked", month_ago),
+            "searches":           count_event("stock_searched", month_ago),
+            "watchlist_adds":     count_event("watchlist_added", month_ago),
+        },
+        "top_symbols_7d": top_symbols(week_ago),
+    })
