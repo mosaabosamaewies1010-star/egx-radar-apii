@@ -14,6 +14,7 @@ from app import db
 from app.models.opportunity import Opportunity
 from app.models.score import RadarScoreHistory
 from app.models.regime import MarketRegimeHistory
+from app.models.scan_log import ScanLog
 
 logger = logging.getLogger(__name__)
 admin_bp = Blueprint("admin", __name__)
@@ -147,6 +148,61 @@ def system_health():
             "scan_days_7d": scored_week,
         },
         "regime": regime_info,
+        "release_notes": _get_release_notes(),
+    })
+
+
+def _get_release_notes():
+    logs = (
+        ScanLog.query
+        .order_by(ScanLog.run_date.desc())
+        .limit(10)
+        .all()
+    )
+    return [l.to_dict() for l in logs]
+
+
+@admin_bp.get("/api/admin/kb-snapshot")
+def kb_snapshot():
+    """Weekly KB snapshot — returns all closed SRA trades for archiving."""
+    api_key = request.headers.get("X-API-Key") or request.args.get("api_key")
+    expected = os.getenv("BOT_API_KEY")
+    if not expected or api_key != expected:
+        return jsonify({"error": "unauthorized"}), 401
+
+    from app.models.opportunity import Opportunity
+    closed = (
+        Opportunity.query
+        .filter(
+            Opportunity.opp_type.like("SRA_%"),
+            Opportunity.outcome.in_(["WIN", "LOSS"])
+        )
+        .all()
+    )
+    wins   = sum(1 for o in closed if o.outcome == "WIN")
+    losses = sum(1 for o in closed if o.outcome == "LOSS")
+    total  = len(closed)
+
+    return jsonify({
+        "snapshot_date": date.today().isoformat(),
+        "size":          total,
+        "wins":          wins,
+        "losses":        losses,
+        "win_rate":      round(wins / total * 100, 1) if total > 0 else None,
+        "trades": [
+            {
+                "id":          o.id,
+                "symbol":      o.stock.symbol if o.stock else None,
+                "run_date":    o.run_date.isoformat() if o.run_date else None,
+                "opp_type":    o.opp_type,
+                "outcome":     o.outcome,
+                "exit_reason": o.exit_reason,
+                "pnl_pct":     o.pnl_pct,
+                "hold_days":   o.hold_days,
+                "snapshot":    o.feature_snapshot,
+            }
+            for o in closed
+        ],
     })
 
 

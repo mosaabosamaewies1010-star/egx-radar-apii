@@ -12,7 +12,7 @@ Old Momentum records: opp_type = "Breakout" | "Momentum" | "Swing" | "Sharia"
 New SRA records:      opp_type = "SRA_A+"   | "SRA_A"   | "SRA_B"
 """
 import logging
-from datetime import date
+from datetime import date, datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,12 @@ def run_daily_scan(app) -> None:
             from app.models.score import RadarScoreHistory
             from app.models.opportunity import Opportunity
             from app.models.regime import MarketRegimeHistory
+            from app.models.scan_log import ScanLog
+
+            today = date.today()
+            scan_log = ScanLog(run_date=today, status="running")
+            db.session.add(scan_log)
+            db.session.commit()
             from app.services.indicators import compute_indicators
             from app.services.radar_score import compute_radar_score
             from app.services.opportunity import compute_opportunity
@@ -44,7 +50,6 @@ def run_daily_scan(app) -> None:
                 logger.warning("daily_scan: sra_engine not available — skipping SRA pass")
                 _SRA_AVAILABLE = False
 
-            today  = date.today()
             stocks = Stock.query.filter_by(is_active=True).all()
 
             # ── Regime (old system — kept for Momentum pass) ─────────────────
@@ -303,5 +308,34 @@ def run_daily_scan(app) -> None:
                 success, skip, fail,
             )
 
+            # ── Update ScanLog ───────────────────────────────────────────────
+            sra_count = Opportunity.query.filter(
+                Opportunity.opp_type.like("SRA_%"), Opportunity.run_date == today
+            ).count()
+            momentum_count = Opportunity.query.filter(
+                ~Opportunity.opp_type.like("SRA_%"), Opportunity.run_date == today
+            ).count()
+            kb_size = Opportunity.query.filter(
+                Opportunity.opp_type.like("SRA_%"),
+                Opportunity.outcome.in_(["WIN", "LOSS"])
+            ).count()
+
+            scan_log.stocks_scanned   = success + skip
+            scan_log.sra_signals      = sra_count
+            scan_log.momentum_signals = momentum_count
+            scan_log.kb_size          = kb_size
+            scan_log.regime           = sra_regime if _SRA_AVAILABLE else momentum_regime
+            scan_log.breadth_pct      = breadth_pct if _SRA_AVAILABLE else None
+            scan_log.status           = "success" if fail == 0 else "partial"
+            scan_log.finished_at      = datetime.now(timezone.utc)
+            db.session.commit()
+
         except Exception:
             logger.exception("daily_scan: top-level error")
+            try:
+                scan_log.status        = "failed"
+                scan_log.error_message = "top-level exception — see server logs"
+                scan_log.finished_at   = datetime.now(timezone.utc)
+                db.session.commit()
+            except Exception:
+                pass

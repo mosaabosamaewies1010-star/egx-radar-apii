@@ -1,0 +1,34 @@
+name: EGX KB Weekly Snapshot
+
+on:
+  schedule:
+    # كل خميس 15:00 UTC = 17:00 Cairo — بعد آخر يوم تداول في الأسبوع
+    - cron: '0 15 * * 4'
+  workflow_dispatch:
+
+jobs:
+  kb-snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Download KB snapshot
+        run: |
+          DATE=$(date '+%Y-%m-%d')
+          curl -s "${{ secrets.RENDER_API_URL }}/api/admin/kb-snapshot" \
+            -H "X-API-Key: ${{ secrets.BOT_API_KEY }}" \
+            -o "knowledge_base_${DATE}.json"
+          echo "Snapshot saved: knowledge_base_${DATE}.json"
+          cat "knowledge_base_${DATE}.json" | python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          print(f'KB size: {d.get(\"size\", 0)} closed trades')
+          print(f'Win rate: {d.get(\"win_rate\", \"N/A\")}%')
+          "
+
+      - name: Upload snapshot as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kb-snapshot-${{ github.run_id }}
+          path: knowledge_base_*.json
+          retention-days: 90
