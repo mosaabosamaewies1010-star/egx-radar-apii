@@ -15,12 +15,11 @@ with app.app_context():
     from app import db
     db.create_all()
     logging.getLogger(__name__).info("DB tables ready.")
-    if os.getenv("FLASK_ENV") != "production":
-        try:
-            from scripts.seed_stocks import seed as seed_stocks
-            seed_stocks()
-        except Exception:
-            pass
+    try:
+        from scripts.seed_stocks import seed as seed_stocks
+        seed_stocks()
+    except Exception:
+        logging.getLogger(__name__).exception("seed_stocks failed")
 
 if __name__ == "__main__":
     debug = os.getenv("FLASK_DEBUG", "1") == "1"
