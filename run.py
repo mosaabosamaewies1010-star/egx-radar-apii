@@ -13,7 +13,19 @@ app = create_app()
 
 with app.app_context():
     from app import db
+    from sqlalchemy import text
     db.create_all()
+    # Add new columns to payments table if they don't exist yet
+    for col_sql in [
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_method VARCHAR(30)",
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS receipt_image  TEXT",
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS admin_note     TEXT",
+    ]:
+        try:
+            db.session.execute(text(col_sql))
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
     logging.getLogger(__name__).info("DB tables ready.")
     try:
         from scripts.seed_stocks import seed as seed_stocks

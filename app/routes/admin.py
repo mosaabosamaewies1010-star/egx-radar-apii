@@ -1,12 +1,15 @@
 """
 Admin-only endpoints — all protected by BOT_API_KEY header or query param.
 
-GET  /api/admin/health        — system health (public, for frontend dashboard)
-GET  /api/admin/dashboard     — full dashboard (JWT auth, owner email only)
-GET  /api/admin/users         — list all registered users
-POST /api/admin/grant-pro     — set is_pro=True for a given email
-POST /api/admin/revoke-pro    — set is_pro=False for a given email
-GET  /api/admin/analytics     — aggregated event counts / page views
+GET  /api/admin/health              — system health (public, for frontend dashboard)
+GET  /api/admin/dashboard           — full dashboard (JWT auth, owner email only)
+GET  /api/admin/users               — list all registered users
+POST /api/admin/grant-pro           — set is_pro=True for a given email
+POST /api/admin/revoke-pro          — set is_pro=False for a given email
+GET  /api/admin/analytics           — aggregated event counts / page views
+GET  /api/admin/payments            — list pending payments with receipt images (JWT owner)
+POST /api/admin/payments/<id>/approve — approve payment → activate PRO (JWT owner)
+POST /api/admin/payments/<id>/reject  — reject payment with note (JWT owner)
 """
 import os
 from datetime import date, timedelta, datetime, timezone
@@ -17,6 +20,7 @@ from sqlalchemy import func
 from app import db
 from app.models.user import User
 from app.models.analytics import AnalyticsEvent
+from app.models.payment import Payment
 
 admin_bp = Blueprint("admin", __name__)
 
@@ -348,3 +352,82 @@ def analytics_summary():
         "top_pages":        [{"path": path, "views": cnt} for path, cnt in top_pages],
         "top_stocks":       [{"symbol": sym,  "views": cnt} for sym,  cnt in top_stocks],
     })
+
+
+# ── Payments review (JWT owner) ───────────────────────────────────────────────
+
+def _require_owner():
+    """Return (user, None) if JWT owner, else (None, error_response)."""
+    from flask_jwt_extended import verify_jwt_in_request, get_jwt_identity
+    try:
+        verify_jwt_in_request()
+    except Exception:
+        return None, (jsonify({"error": "يجب تسجيل الدخول"}), 401)
+    uid        = get_jwt_identity()
+    user       = User.query.get(int(uid))
+    admin_email = os.getenv("ADMIN_EMAIL", "").strip().lower()
+    if not user or not admin_email or user.email.lower() != admin_email:
+        return None, (jsonify({"error": "غير مصرح"}), 403)
+    return user, None
+
+
+@admin_bp.get("/api/admin/payments")
+def list_payments():
+    """All payments — pending first — with receipt images. JWT owner only."""
+    _, err = _require_owner()
+    if err:
+        return err
+
+    status_filter = request.args.get("status")   # pending | completed | rejected | all
+    query = Payment.query.order_by(Payment.created_at.desc())
+    if status_filter and status_filter != "all":
+        query = query.filter_by(status=status_filter)
+
+    payments = query.limit(100).all()
+    return jsonify({
+        "total":    len(payments),
+        "payments": [p.to_dict_admin() for p in payments],
+    })
+
+
+@admin_bp.post("/api/admin/payments/<int:payment_id>/approve")
+def approve_payment(payment_id: int):
+    """Approve a pending payment → activate PRO. JWT owner only."""
+    _, err = _require_owner()
+    if err:
+        return err
+
+    payment = db.session.get(Payment, payment_id)
+    if not payment:
+        return jsonify({"error": "الدفعة غير موجودة"}), 404
+    if payment.status != "pending":
+        return jsonify({"error": f"الدفعة بحالة {payment.status} ولا يمكن الموافقة عليها"}), 422
+
+    payment.status = "completed"
+    user = db.session.get(User, payment.user_id)
+    if user:
+        user.is_pro = True
+    db.session.commit()
+
+    return jsonify({"ok": True, "payment_id": payment_id, "user_email": user.email if user else None})
+
+
+@admin_bp.post("/api/admin/payments/<int:payment_id>/reject")
+def reject_payment(payment_id: int):
+    """Reject a pending payment with optional note. JWT owner only."""
+    _, err = _require_owner()
+    if err:
+        return err
+
+    payment = db.session.get(Payment, payment_id)
+    if not payment:
+        return jsonify({"error": "الدفعة غير موجودة"}), 404
+    if payment.status != "pending":
+        return jsonify({"error": f"الدفعة بحالة {payment.status}"}), 422
+
+    body = request.get_json(silent=True) or {}
+    payment.status     = "rejected"
+    payment.admin_note = body.get("note", "").strip() or None
+    db.session.commit()
+
+    return jsonify({"ok": True, "payment_id": payment_id})
