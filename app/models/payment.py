@@ -39,8 +39,8 @@ PAYMENT_METHOD_LABELS = {
 
 # Account numbers shown to the user during checkout
 PAYMENT_ACCOUNTS = {
-    "instapay":      "01XXXXXXXXXX",   # ← ضع رقمك هنا
-    "vodafone_cash": "01XXXXXXXXXX",   # ← ضع رقمك هنا
+    "instapay":      "01002005204",
+    "vodafone_cash": "01002005204",
 }
 
 
