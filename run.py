@@ -15,11 +15,16 @@ with app.app_context():
     from app import db
     from sqlalchemy import text
     db.create_all()
-    # Add new columns to payments table if they don't exist yet
+    # Add new columns if they don't exist yet
     for col_sql in [
-        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_method VARCHAR(30)",
-        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS receipt_image  TEXT",
-        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS admin_note     TEXT",
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_method   VARCHAR(30)",
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS receipt_image    TEXT",
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS admin_note       TEXT",
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS original_amount  FLOAT",
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS discount_applied BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE users    ADD COLUMN IF NOT EXISTS referral_code    VARCHAR(20)",
+        "ALTER TABLE users    ADD COLUMN IF NOT EXISTS referred_by_id   INTEGER",
+        "ALTER TABLE users    ADD COLUMN IF NOT EXISTS discount_credits INTEGER DEFAULT 0",
     ]:
         try:
             db.session.execute(text(col_sql))

@@ -407,6 +407,11 @@ def approve_payment(payment_id: int):
     user = db.session.get(User, payment.user_id)
     if user:
         user.is_pro = True
+        # لو المستخدم جاء بدعوة → أعطِ صاحب الدعوة credit
+        if user.referred_by_id:
+            referrer = db.session.get(User, user.referred_by_id)
+            if referrer:
+                referrer.discount_credits = (referrer.discount_credits or 0) + 1
     db.session.commit()
 
     return jsonify({"ok": True, "payment_id": payment_id, "user_email": user.email if user else None})

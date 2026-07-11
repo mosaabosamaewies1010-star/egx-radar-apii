@@ -35,13 +35,27 @@ def register():
     if User.query.filter_by(email=email).first():
         return jsonify({"error": "البريد الإلكتروني مستخدم بالفعل"}), 409
 
+    # Check referral code
+    ref_code   = (data.get("ref") or "").strip().upper()
+    referrer   = User.query.filter_by(referral_code=ref_code).first() if ref_code else None
+    has_referral = referrer is not None
+
     user = User(email=email, name=name)
     user.set_password(password)
+    user.ensure_referral_code()
+    if referrer:
+        user.referred_by_id   = referrer.id
+        user.discount_credits = 1   # خصم 20% على أول اشتراك
+
     db.session.add(user)
     db.session.commit()
 
     token = create_access_token(identity=str(user.id))
-    return jsonify({"token": token, "user": user.to_dict()}), 201
+    return jsonify({
+        "token":       token,
+        "user":        user.to_dict(),
+        "has_referral": has_referral,
+    }), 201
 
 
 @auth_bp.post("/api/auth/login")
@@ -71,4 +85,8 @@ def me():
     user = db.session.get(User, user_id)
     if not user or not user.is_active:
         return jsonify({"error": "المستخدم غير موجود"}), 404
+    # توليد referral_code لو مش موجود
+    if not user.referral_code:
+        user.ensure_referral_code()
+        db.session.commit()
     return jsonify(user.to_dict()), 200

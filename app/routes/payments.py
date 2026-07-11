@@ -53,26 +53,38 @@ def subscribe():
     if len(receipt_image.encode()) > MAX_IMAGE_BYTES:
         return jsonify({"error": "حجم الصورة أكبر من 5 ميجا"}), 422
 
-    plan = PLANS[plan_id]
-    ref  = f"EGX-{uuid.uuid4().hex[:12].upper()}"
+    plan             = PLANS[plan_id]
+    original_price   = plan["price"]
+    ref              = f"EGX-{uuid.uuid4().hex[:12].upper()}"
+
+    # تطبيق خصم 20% لو عنده discount_credits
+    discount_applied = False
+    final_price      = original_price
+    if user.discount_credits > 0:
+        final_price      = round(original_price * 0.8, 2)
+        discount_applied = True
+        user.discount_credits -= 1
 
     payment = Payment(
-        user_id        = user_id,
-        plan           = plan_id,
-        amount         = plan["price"],
-        currency       = plan["currency"],
-        status         = "pending",
-        provider_ref   = ref,
-        payment_method = payment_method,
-        receipt_image  = receipt_image,
+        user_id          = user_id,
+        plan             = plan_id,
+        amount           = final_price,
+        original_amount  = original_price if discount_applied else None,
+        currency         = plan["currency"],
+        status           = "pending",
+        provider_ref     = ref,
+        payment_method   = payment_method,
+        receipt_image    = receipt_image,
+        discount_applied = discount_applied,
     )
     db.session.add(payment)
     db.session.commit()
 
     return jsonify({
-        "payment":      payment.to_dict(),
-        "provider_ref": ref,
-        "message":      "تم استلام طلبك بنجاح — في انتظار موافقة الادمن",
+        "payment":          payment.to_dict(),
+        "provider_ref":     ref,
+        "discount_applied": discount_applied,
+        "message":          "تم استلام طلبك بنجاح — في انتظار موافقة الادمن",
     }), 201
 
 
