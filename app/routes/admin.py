@@ -2,6 +2,7 @@
 Admin-only endpoints — all protected by BOT_API_KEY header or query param.
 
 GET  /api/admin/health        — system health (public, for frontend dashboard)
+GET  /api/admin/dashboard     — full dashboard (JWT auth, owner email only)
 GET  /api/admin/users         — list all registered users
 POST /api/admin/grant-pro     — set is_pro=True for a given email
 POST /api/admin/revoke-pro    — set is_pro=False for a given email
@@ -10,6 +11,7 @@ GET  /api/admin/analytics     — aggregated event counts / page views
 import os
 from datetime import date, timedelta, datetime, timezone
 from flask import Blueprint, jsonify, request
+from flask_jwt_extended import jwt_required, get_jwt_identity
 from sqlalchemy import func
 
 from app import db
@@ -26,6 +28,94 @@ def _check_key():
     if not expected or api_key != expected:
         return jsonify({"error": "unauthorized"}), 401
     return None
+
+
+# ── Owner dashboard (JWT auth, email match) ───────────────────────────────────
+
+def _get_analytics_data(days: int = 7):
+    since_dt = datetime.now(timezone.utc) - timedelta(days=days)
+    page_views = AnalyticsEvent.query.filter(
+        AnalyticsEvent.name == "page_view",
+        AnalyticsEvent.received_at >= since_dt,
+    ).count()
+    total_events = AnalyticsEvent.query.filter(AnalyticsEvent.received_at >= since_dt).count()
+    event_breakdown = (
+        db.session.query(AnalyticsEvent.name, func.count(AnalyticsEvent.id))
+        .filter(AnalyticsEvent.received_at >= since_dt)
+        .group_by(AnalyticsEvent.name)
+        .order_by(func.count(AnalyticsEvent.id).desc())
+        .all()
+    )
+    top_pages = (
+        db.session.query(AnalyticsEvent.path, func.count(AnalyticsEvent.id))
+        .filter(
+            AnalyticsEvent.name == "page_view",
+            AnalyticsEvent.received_at >= since_dt,
+            AnalyticsEvent.path.isnot(None),
+        )
+        .group_by(AnalyticsEvent.path)
+        .order_by(func.count(AnalyticsEvent.id).desc())
+        .limit(10).all()
+    )
+    top_stocks = (
+        db.session.query(AnalyticsEvent.symbol, func.count(AnalyticsEvent.id))
+        .filter(
+            AnalyticsEvent.name == "stock_page_viewed",
+            AnalyticsEvent.received_at >= since_dt,
+            AnalyticsEvent.symbol.isnot(None),
+        )
+        .group_by(AnalyticsEvent.symbol)
+        .order_by(func.count(AnalyticsEvent.id).desc())
+        .limit(10).all()
+    )
+    return {
+        "period_days":     days,
+        "total_events":    total_events,
+        "page_views":      page_views,
+        "event_breakdown": [{"name": n, "count": c} for n, c in event_breakdown],
+        "top_pages":       [{"path": p, "views": c} for p, c in top_pages],
+        "top_stocks":      [{"symbol": s, "views": c} for s, c in top_stocks],
+    }
+
+
+@admin_bp.get("/api/admin/dashboard")
+@jwt_required()
+def owner_dashboard():
+    """Full dashboard — JWT auth, only the ADMIN_EMAIL owner can access."""
+    uid = get_jwt_identity()
+    user = User.query.get(int(uid))
+    admin_email = os.getenv("ADMIN_EMAIL", "").strip().lower()
+
+    if not user or not admin_email or user.email.lower() != admin_email:
+        return jsonify({"error": "غير مصرح"}), 403
+
+    days = int(request.args.get("days", 7))
+
+    # Users
+    all_users = User.query.order_by(User.created_at.desc()).all()
+    pro_count  = sum(1 for u in all_users if u.is_pro)
+
+    users_list = [
+        {
+            "id":         u.id,
+            "email":      u.email,
+            "name":       u.name,
+            "is_pro":     u.is_pro,
+            "created_at": u.created_at.isoformat() if u.created_at else None,
+            "last_login": u.last_login_at.isoformat() if u.last_login_at else None,
+        }
+        for u in all_users
+    ]
+
+    return jsonify({
+        "users": {
+            "total": len(all_users),
+            "pro":   pro_count,
+            "free":  len(all_users) - pro_count,
+            "list":  users_list,
+        },
+        "analytics": _get_analytics_data(days),
+    })
 
 
 # ── Health (public — used by frontend admin dashboard) ────────────────────────
