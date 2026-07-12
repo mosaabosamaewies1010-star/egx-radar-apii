@@ -15,8 +15,15 @@ opps_bp = Blueprint("opportunities", __name__)
 VALID_OUTCOMES = {"WIN", "LOSS", "EXPIRED"}
 
 
+def _opps_cache_key():
+    sharia = "s1" if request.args.get("sharia") == "1" else "s0"
+    setup  = request.args.get("setup", "").upper() or "all"
+    tier   = "pro" if current_is_pro() else "free"
+    return f"opps_{sharia}_{setup}_{tier}"
+
+
 @opps_bp.get("/api/opportunities")
-@cache.cached(timeout=120, key_prefix="opportunities_active")
+@cache.cached(timeout=120, key_prefix=_opps_cache_key)
 def list_opportunities():
     limit       = min(int(request.args.get("limit",  20)), 50)
     offset      = int(request.args.get("offset", 0))
