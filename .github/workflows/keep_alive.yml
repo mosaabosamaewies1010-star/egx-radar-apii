@@ -16,8 +16,8 @@ jobs:
         run: |
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
             --max-time 60 \
-            "${{ secrets.RENDER_API_URL }}/api/market/regime")
+            "https://egx-radar-api.onrender.com/api/market/regime")
           echo "Status: $STATUS"
           if [ "$STATUS" != "200" ]; then
-            echo "Warning: backend returned $STATUS"
+            echo "Warning: backend returned $STATUS (may be warming up)"
           fi
