@@ -446,7 +446,7 @@ def reject_payment(payment_id: int):
 @admin_bp.get("/api/admin/sharia")
 def list_sharia_stocks():
     """List all stocks currently marked is_sharia=True in DB."""
-    _, err = _require_owner()
+    err = _check_key()
     if err:
         return err
 
@@ -467,7 +467,7 @@ def sync_sharia_stocks():
 
     Returns a summary of what changed. Run after each EGX rebalancing.
     """
-    _, err = _require_owner()
+    err = _check_key()
     if err:
         return err
 
