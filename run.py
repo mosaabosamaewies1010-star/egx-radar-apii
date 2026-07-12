@@ -22,9 +22,10 @@ with app.app_context():
         "ALTER TABLE payments ADD COLUMN IF NOT EXISTS admin_note       TEXT",
         "ALTER TABLE payments ADD COLUMN IF NOT EXISTS original_amount  FLOAT",
         "ALTER TABLE payments ADD COLUMN IF NOT EXISTS discount_applied BOOLEAN DEFAULT FALSE",
-        "ALTER TABLE users    ADD COLUMN IF NOT EXISTS referral_code    VARCHAR(20)",
-        "ALTER TABLE users    ADD COLUMN IF NOT EXISTS referred_by_id   INTEGER",
-        "ALTER TABLE users    ADD COLUMN IF NOT EXISTS discount_credits INTEGER DEFAULT 0",
+        "ALTER TABLE users    ADD COLUMN IF NOT EXISTS referral_code          VARCHAR(20)",
+        "ALTER TABLE users    ADD COLUMN IF NOT EXISTS referred_by_id         INTEGER",
+        "ALTER TABLE users    ADD COLUMN IF NOT EXISTS referral_discount_used  BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE users    ADD COLUMN IF NOT EXISTS discount_credits        INTEGER DEFAULT 0",
     ]:
         try:
             db.session.execute(text(col_sql))

@@ -10,9 +10,13 @@ import os
 
 load_dotenv()
 
-db    = SQLAlchemy()
-cache = Cache()
-jwt   = JWTManager()
+db      = SQLAlchemy()
+cache   = Cache()
+jwt     = JWTManager()
+
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+limiter = Limiter(key_func=get_remote_address, default_limits=[], storage_uri="memory://")
 
 
 def create_app(config_name: str = "development") -> Flask:
@@ -32,6 +36,7 @@ def create_app(config_name: str = "development") -> Flask:
     Migrate(app, db)
     cache.init_app(app)
     jwt.init_app(app)
+    limiter.init_app(app)
     CORS(app, origins=os.getenv("CORS_ORIGINS", "http://localhost:3000").split(","))
 
     # Register blueprints (routes already include full paths)

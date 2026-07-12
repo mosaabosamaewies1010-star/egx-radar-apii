@@ -53,17 +53,30 @@ def subscribe():
     if len(receipt_image.encode()) > MAX_IMAGE_BYTES:
         return jsonify({"error": "حجم الصورة أكبر من 5 ميجا"}), 422
 
-    plan             = PLANS[plan_id]
-    original_price   = plan["price"]
-    ref              = f"EGX-{uuid.uuid4().hex[:12].upper()}"
+    plan           = PLANS[plan_id]
+    original_price = plan["price"]
+    ref            = f"EGX-{uuid.uuid4().hex[:12].upper()}"
 
-    # تطبيق خصم 20% لو عنده discount_credits
     discount_applied = False
     final_price      = original_price
-    if user.discount_credits > 0:
+
+    # 1) خصم الدعوة — مستخدم جديد جاء عن طريق referral link (مرة واحدة فقط)
+    if user.has_referral_discount():
         final_price      = round(original_price * 0.8, 2)
         discount_applied = True
-        user.discount_credits -= 1
+        user.referral_discount_used = True   # يُمنع استخدامه مرة ثانية
+
+    # 2) خصم مكافأة الداعي — atomic update يمنع race condition
+    elif user.discount_credits > 0:
+        from sqlalchemy import text as _text
+        updated = db.session.execute(
+            _text("UPDATE users SET discount_credits = discount_credits - 1 WHERE id = :uid AND discount_credits > 0"),
+            {"uid": user_id},
+        ).rowcount
+        if updated:
+            final_price      = round(original_price * 0.8, 2)
+            discount_applied = True
+            db.session.expire(user)   # أعد تحميل القيمة من DB
 
     payment = Payment(
         user_id          = user_id,

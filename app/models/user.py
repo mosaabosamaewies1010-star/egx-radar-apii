@@ -19,9 +19,10 @@ class User(db.Model):
     is_active        = db.Column(db.Boolean, default=True,  nullable=False)
     is_pro           = db.Column(db.Boolean, default=False, nullable=False)
 
-    referral_code    = db.Column(db.String(20), unique=True, nullable=True, index=True)
-    referred_by_id   = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
-    discount_credits = db.Column(db.Integer, default=0, nullable=False)
+    referral_code          = db.Column(db.String(20), unique=True, nullable=True, index=True)
+    referred_by_id         = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    referral_discount_used = db.Column(db.Boolean, default=False, nullable=False)  # خصم الدعوة استُخدم
+    discount_credits       = db.Column(db.Integer, default=0, nullable=False)       # مكافآت الشخص الداعي
 
     created_at    = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     last_login_at = db.Column(db.DateTime, nullable=True)
@@ -39,14 +40,19 @@ class User(db.Model):
             self.referral_code = _gen_ref_code()
         return self.referral_code
 
+    def has_referral_discount(self) -> bool:
+        """هل لديه خصم دعوة لم يستخدمه بعد؟"""
+        return bool(self.referred_by_id and not self.referral_discount_used)
+
     def to_dict(self) -> dict:
         return {
-            "id":               self.id,
-            "email":            self.email,
-            "name":             self.name,
-            "is_pro":           self.is_pro,
-            "referral_code":    self.referral_code,
-            "discount_credits": self.discount_credits,
-            "referred_by_id":   self.referred_by_id,
-            "created_at":       self.created_at.isoformat(),
+            "id":                    self.id,
+            "email":                 self.email,
+            "name":                  self.name,
+            "is_pro":                self.is_pro,
+            "referral_code":         self.referral_code,
+            "discount_credits":      self.discount_credits,
+            "referred_by_id":        self.referred_by_id,
+            "has_referral_discount": self.has_referral_discount(),
+            "created_at":            self.created_at.isoformat(),
         }
