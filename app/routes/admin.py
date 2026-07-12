@@ -10,6 +10,8 @@ GET  /api/admin/analytics           — aggregated event counts / page views
 GET  /api/admin/payments            — list pending payments with receipt images (JWT owner)
 POST /api/admin/payments/<id>/approve — approve payment → activate PRO (JWT owner)
 POST /api/admin/payments/<id>/reject  — reject payment with note (JWT owner)
+GET  /api/admin/sharia              — list current Sharia stocks in DB
+POST /api/admin/sharia/sync         — update Sharia list from supplied symbols (EGX rebalance)
 """
 import os
 from datetime import date, timedelta, datetime, timezone
@@ -19,6 +21,7 @@ from sqlalchemy import func
 
 from app import db
 from app.models.user import User
+from app.models.stock import Stock
 from app.models.analytics import AnalyticsEvent
 from app.models.payment import Payment
 
@@ -436,3 +439,72 @@ def reject_payment(payment_id: int):
     db.session.commit()
 
     return jsonify({"ok": True, "payment_id": payment_id})
+
+
+# ── Sharia sync (EGX rebalance every ~6 months) ───────────────────────────────
+
+@admin_bp.get("/api/admin/sharia")
+def list_sharia_stocks():
+    """List all stocks currently marked is_sharia=True in DB."""
+    _, err = _require_owner()
+    if err:
+        return err
+
+    stocks = Stock.query.filter_by(is_sharia=True).order_by(Stock.symbol).all()
+    return jsonify({
+        "count":  len(stocks),
+        "stocks": [{"symbol": s.symbol, "name_ar": s.name_ar, "sector": s.sector} for s in stocks],
+        "note":   "EGX 33 Shariah index rebalances every ~6 months (Jan & Jul). Use POST /api/admin/sharia/sync to update.",
+    })
+
+
+@admin_bp.post("/api/admin/sharia/sync")
+def sync_sharia_stocks():
+    """
+    Update is_sharia flags to match the supplied EGX official list.
+
+    Body: { "symbols": ["ADIB", "SAUD", "FAIT", ...] }
+
+    Returns a summary of what changed. Run after each EGX rebalancing.
+    """
+    _, err = _require_owner()
+    if err:
+        return err
+
+    body    = request.get_json(silent=True) or {}
+    symbols = body.get("symbols")
+    if not symbols or not isinstance(symbols, list):
+        return jsonify({"error": "symbols array required"}), 400
+
+    new_sharia = {s.strip().upper().replace(".CA", "") for s in symbols if s.strip()}
+    if len(new_sharia) < 10:
+        return jsonify({"error": f"Only {len(new_sharia)} symbols — expected 30+. Check your list."}), 400
+
+    all_stocks  = Stock.query.all()
+    added       = []
+    removed     = []
+    not_in_db   = []
+
+    for sym in new_sharia:
+        stock = next((s for s in all_stocks if s.symbol == sym), None)
+        if stock is None:
+            not_in_db.append(sym)
+        elif not stock.is_sharia:
+            stock.is_sharia = True
+            added.append(sym)
+
+    for stock in all_stocks:
+        if stock.is_sharia and stock.symbol not in new_sharia:
+            stock.is_sharia = False
+            removed.append(stock.symbol)
+
+    db.session.commit()
+
+    return jsonify({
+        "ok":         True,
+        "egx_count":  len(new_sharia),
+        "added":      sorted(added),
+        "removed":    sorted(removed),
+        "not_in_db":  sorted(not_in_db),
+        "message":    f"+{len(added)} sharia, -{len(removed)} sharia, {len(not_in_db)} symbols not found in DB",
+    })
