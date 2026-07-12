@@ -165,7 +165,10 @@ def system_health():
     total_closed = len(closed)
     wins         = sum(1 for o in closed if o.outcome == "WIN")
     losses       = sum(1 for o in closed if o.outcome == "LOSS")
-    win_rate     = round(wins / total_closed * 100, 1) if total_closed > 0 else None
+    expired      = sum(1 for o in closed if o.outcome == "EXPIRED")
+    # Win rate excludes EXPIRED — only counts decided outcomes (WIN vs LOSS)
+    decided  = wins + losses
+    win_rate = round(wins / decided * 100, 1) if decided > 0 else None
 
     kb_size = (
         Opportunity.query
@@ -206,6 +209,7 @@ def system_health():
             "total_closed": total_closed,
             "wins":         wins,
             "losses":       losses,
+            "expired":      expired,
             "win_rate":     win_rate,
         },
         "sra": {
