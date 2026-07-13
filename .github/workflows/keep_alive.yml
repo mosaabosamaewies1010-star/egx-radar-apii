@@ -9,7 +9,7 @@ on:
 jobs:
   ping:
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 3
 
     steps:
       - name: Ping backend health
@@ -22,4 +22,34 @@ jobs:
             echo "Backend is up and responding."
           else
             echo "Warning: backend returned $STATUS (may still be warming up — not a failure)"
+          fi
+
+      - name: Fallback scan trigger (if daily_scan cron missed today)
+        run: |
+          # فحص بس بعد 13:30 UTC (= 15:30 Cairo) — بعد إغلاق السوق بساعة
+          HOUR=$(date -u +%H)
+          MIN=$(date -u +%M)
+          NOW_MINS=$(( HOUR * 60 + MIN ))
+          SCAN_START=810   # 13:30 UTC
+          SCAN_END=960     # 16:00 UTC
+
+          if [ "$NOW_MINS" -ge "$SCAN_START" ] && [ "$NOW_MINS" -le "$SCAN_END" ]; then
+            HEALTH=$(curl -s --max-time 30 \
+              "https://egx-radar-api.onrender.com/api/admin/health" || echo "{}")
+            SCORED=$(echo "$HEALTH" | python3 -c \
+              "import sys,json; d=json.load(sys.stdin); print(d['scanner']['scored_today'])" \
+              2>/dev/null || echo "999")
+            echo "scored_today=$SCORED (check window: ${HOUR}:${MIN} UTC)"
+            if [ "$SCORED" = "0" ]; then
+              echo "Fallback: scan not detected today — triggering..."
+              curl -s -X POST \
+                "https://egx-radar-api.onrender.com/api/admin/trigger-scan" \
+                -H "X-API-Key: ${{ secrets.BOT_API_KEY }}" \
+                -H "Content-Type: application/json" \
+                --max-time 30 || echo "Trigger request sent (server starting scan)"
+            else
+              echo "Scan already ran today (scored=$SCORED) — no action needed."
+            fi
+          else
+            echo "Outside scan window (${HOUR}:${MIN} UTC) — skipping check."
           fi
