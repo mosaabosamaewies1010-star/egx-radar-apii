@@ -1,4 +1,4 @@
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request
 from sqlalchemy import func, case
 from app import db
 from app.models import Opportunity, Stock, StrategyVersion
@@ -126,4 +126,63 @@ def performance():
         "by_sector":  sectors,
         "by_version": versions,
         "top_stocks": top_stocks,
+    })
+
+
+@performance_bp.get("/api/performance/trades")
+def trade_history():
+    """Paginated list of closed trades for the trade-history view."""
+    limit   = min(int(request.args.get("limit",  50)), 200)
+    offset  = int(request.args.get("offset", 0))
+    outcome = request.args.get("outcome", "").upper()   # WIN | LOSS | EXPIRED | (all)
+    symbol  = request.args.get("symbol",  "").upper()
+
+    query = (
+        Opportunity.query
+        .join(Stock)
+        .filter(Opportunity.outcome.in_(["WIN", "LOSS", "EXPIRED"]))
+        .order_by(Opportunity.closed_at.desc(), Opportunity.id.desc())
+    )
+
+    if outcome in ("WIN", "LOSS", "EXPIRED"):
+        query = query.filter(Opportunity.outcome == outcome)
+    if symbol:
+        query = query.filter(Stock.symbol == symbol)
+
+    total = query.count()
+    trades = query.offset(offset).limit(limit).all()
+
+    def _trade(o: Opportunity) -> dict:
+        snap = o.feature_snapshot or {}
+        return {
+            "id":             o.id,
+            "symbol":         o.stock.symbol,
+            "name_ar":        o.stock.name_ar,
+            "sector":         o.stock.sector,
+            "is_sharia":      o.stock.is_sharia,
+            "opp_type":       o.opp_type,
+            "radar_score":    o.radar_score,
+            "signal_quality": o.signal_quality,
+            "run_date":       o.run_date.isoformat() if o.run_date else None,
+            "closed_at":      o.closed_at.isoformat() if o.closed_at else None,
+            "hold_days":      o.hold_days,
+            "outcome":        o.outcome,
+            "exit_reason":    o.exit_reason,
+            "pnl_pct":        o.pnl_pct,
+            "entry_price":    o.entry_price,
+            "exit_price":     o.exit_price,
+            "tp1_price":      o.tp1_price,
+            "tp2_price":      o.tp2_price,
+            "sl_price":       o.sl_price,
+            "rr_ratio":       o.rr_ratio,
+            "regime":         snap.get("regime"),
+            "sra_grade":      snap.get("sra_grade"),
+            "sra_score":      snap.get("sra_score"),
+        }
+
+    return jsonify({
+        "total":  total,
+        "limit":  limit,
+        "offset": offset,
+        "trades": [_trade(o) for o in trades],
     })
