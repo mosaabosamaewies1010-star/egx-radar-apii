@@ -445,6 +445,30 @@ def reject_payment(payment_id: int):
     return jsonify({"ok": True, "payment_id": payment_id})
 
 
+# ── Trigger daily scan manually ──────────────────────────────────────────────
+
+@admin_bp.post("/api/admin/trigger-scan")
+def trigger_scan():
+    """Trigger the daily scan pipeline in a background thread. Protected by BOT_API_KEY."""
+    err = _check_key()
+    if err:
+        return err
+
+    import threading
+    from flask import current_app
+
+    app = current_app._get_current_object()
+
+    def _run():
+        from app.jobs.daily_scan import run_daily_scan
+        run_daily_scan(app)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+
+    return jsonify({"ok": True, "message": "daily scan started in background"}), 200
+
+
 # ── Sharia sync (EGX rebalance every ~6 months) ───────────────────────────────
 
 @admin_bp.get("/api/admin/sharia")
