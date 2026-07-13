@@ -15,9 +15,11 @@ jobs:
       - name: Ping backend health
         run: |
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            --max-time 60 \
-            "https://egx-radar-api.onrender.com/api/market/regime")
+            --max-time 90 \
+            "https://egx-radar-api.onrender.com/api/market/regime" || echo "000")
           echo "Status: $STATUS"
-          if [ "$STATUS" != "200" ]; then
-            echo "Warning: backend returned $STATUS (may be warming up)"
+          if [ "$STATUS" = "200" ]; then
+            echo "Backend is up and responding."
+          else
+            echo "Warning: backend returned $STATUS (may still be warming up — not a failure)"
           fi
