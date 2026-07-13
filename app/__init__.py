@@ -25,6 +25,12 @@ def create_app(config_name: str = "development") -> Flask:
     # Config
     app.config["SQLALCHEMY_DATABASE_URI"]        = os.getenv("DATABASE_URL", "sqlite:///egx_radar.db")
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+    app.config["SQLALCHEMY_ENGINE_OPTIONS"]      = {
+        "pool_pre_ping": True,      # يتحقق من الـ connection قبل كل استخدام
+        "pool_recycle":  300,       # يجدد الـ connection كل 5 دقايق
+        "pool_size":     5,
+        "max_overflow":  10,
+    }
     app.config["SECRET_KEY"]                     = os.getenv("SECRET_KEY", "dev-secret")
     app.config["CACHE_TYPE"]                     = "SimpleCache"
     app.config["CACHE_DEFAULT_TIMEOUT"]          = 300   # 5 minutes
