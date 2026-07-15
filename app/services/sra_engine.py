@@ -8,7 +8,7 @@ SRA Engine — Smart Recovery Accumulation
   بل "سهم انتهى بيعه وبدأت السيولة الذكية تدخل عند منطقة خوف"
 
 المعادلة الأساسية:
-  SWING_LOW + RVOL_SPIKE_AFTER = نقطة دخول محتملة
+  SWING_LOW + RVOL_SPIKE_ON_OR_AFTER = نقطة دخول محتملة
   SRA Score v2 = قوة الإعداد (0-100)
   Grade A+/A/B = مستوى الثقة
 
@@ -30,10 +30,10 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # ── Constants ──────────────────────────────────────────────────────────────────
-SWING_LOOKBACK  = 5     # bars each side for swing low detection
-SCAN_WINDOW     = 10    # how many recent bars to scan
+SWING_LOOKBACK  = 3     # bars each side — reduced from 5 to catch more recent lows
+SCAN_WINDOW     = 12    # how many recent bars to scan — widened slightly
 RVOL_THRESHOLD  = 1.5   # minimum spike multiplier
-RVOL_WINDOW     = 3     # bars after swing to check RVOL
+RVOL_WINDOW     = 5     # bars to check for RVOL spike — widened from 3
 
 # Exit profiles — frozen from Walk Forward validation
 PROFILES = {
@@ -58,7 +58,7 @@ class SRAResult:
     score:         float      # 0-100
 
     # Signal quality
-    rvol_spike:    float      # RVOL peak in first 3 bars after swing
+    rvol_spike:    float      # RVOL peak in window after (and including) swing
     rsi_at_low:    float
     market_breadth: float     # 0-100%
     regime:        str        # bear | bull | neutral
@@ -89,11 +89,9 @@ class SRAResult:
 
     @property
     def opp_type(self) -> str:
-        """للـ DB: يُخزَّن في حقل opp_type."""
         return f"SRA_{self.grade}"
 
     def feature_snapshot(self) -> dict:
-        """كل السياق — يُحفظ في feature_snapshot JSON كـ Decision Moat."""
         return {
             "setup":                  "SRA_v2",
             "sra_score":              self.score,
@@ -144,41 +142,79 @@ def _compute_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
 # DETECTION
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _detect_recent_swing_lows(df: pd.DataFrame) -> list[int]:
+def _detect_recent_swing_lows(df: pd.DataFrame, ticker: str = "") -> list[int]:
     """
     يكتشف قيعان محلية حديثة.
-    المعيار المزدوج:
-      1. يكون أدنى نقطة في النافذة المحيطة (lookback bars من كل جانب)
-      2. يكون في أدنى 30% من آخر 10 بارات (is_recent_low)
+
+    تغييرات v2:
+    - SWING_LOOKBACK مخفّض من 5 لـ 3 → يشوف قيعان أحدث
+    - tolerance 0.5% → يقبل Double Bottom والقيعان القريبة
+    - quantile من 0.30 لـ 0.40 → يقبل قيعان أكثر واقعية
     """
     n      = len(df)
     swings = []
     lb     = SWING_LOOKBACK
     start  = max(lb, n - SCAN_WINDOW)
 
+    rejected_not_min    = 0
+    rejected_neighbors  = 0
+    rejected_quantile   = 0
+
     for i in range(start, n - lb):
+        low_i      = df["low"].iloc[i]
         window_low = df["low"].iloc[i - lb: i + lb + 1]
-        if df["low"].iloc[i] != window_low.min():
-            continue
-        if df["low"].iloc[i] >= df["low"].iloc[i - 1]:
-            continue
-        if df["low"].iloc[i] >= df["low"].iloc[i + 1]:
+
+        # Must be within 0.5% of the window minimum (allows double bottoms)
+        window_min = window_low.min()
+        if low_i > window_min * 1.005:
+            rejected_not_min += 1
             continue
 
+        # Must be lower than immediate neighbors
+        if low_i >= df["low"].iloc[i - 1]:
+            rejected_neighbors += 1
+            continue
+        if low_i >= df["low"].iloc[i + 1]:
+            rejected_neighbors += 1
+            continue
+
+        # Must be in the lower 40% of the previous 10 bars (loosened from 30%)
         prev10 = df["low"].iloc[max(0, i - 10): i]
-        if len(prev10) >= 3 and df["low"].iloc[i] <= float(prev10.quantile(0.30)):
-            swings.append(i)
+        if len(prev10) >= 3 and low_i > float(prev10.quantile(0.40)):
+            rejected_quantile += 1
+            continue
+
+        swings.append(i)
+
+    if ticker and not swings:
+        logger.debug(
+            "SRA[%s]: no swings — rejected: not_min=%d neighbors=%d quantile=%d (scanned %d-%d of %d)",
+            ticker, rejected_not_min, rejected_neighbors, rejected_quantile, start, n - lb, n,
+        )
 
     return swings
 
 
-def _has_rvol_spike(rvol: pd.Series, sl_idx: int) -> tuple[bool, float]:
-    """يتحقق من RVOL spike في الـ bars بعد القاع مباشرة."""
-    post = rvol.iloc[sl_idx + 1: sl_idx + RVOL_WINDOW + 1]
-    if post.empty:
+def _has_rvol_spike(rvol: pd.Series, sl_idx: int, ticker: str = "") -> tuple[bool, float]:
+    """
+    يتحقق من RVOL spike في يوم القاع نفسه والـ bars بعده.
+
+    إصلاح v2: كان يبدأ من sl_idx+1 فكان يضيّع يوم الـ capitulation نفسه.
+    الآن يبدأ من sl_idx (يوم القاع).
+    """
+    window = rvol.iloc[sl_idx: sl_idx + RVOL_WINDOW + 1]
+    if window.empty:
         return False, 0.0
-    peak = float(post.max())
-    return peak >= RVOL_THRESHOLD, round(peak, 2)
+    peak = float(window.max())
+    has  = peak >= RVOL_THRESHOLD
+
+    if ticker:
+        logger.debug(
+            "SRA[%s]: RVOL check at idx=%d — peak=%.2fx → %s",
+            ticker, sl_idx, peak, "PASS" if has else f"FAIL (need {RVOL_THRESHOLD}x)",
+        )
+
+    return has, round(peak, 2)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -197,9 +233,8 @@ def _compute_sra_score(
     """
     SRA Score v2 — مجمّد من Walk Forward Validation.
     الأوزان:
-      SwingLow  25 | RVOL     35 | Regime 15/10/0
+      SwingLow  25 | RVOL     35 | Regime 15/10/5
       Sector     8 | RSI   8/3/-5 | Dry Vol 3
-      OBV        2 | Support  4
     """
     score   = 25.0
     signals = ["Swing Low confirmed (+25)"]
@@ -207,13 +242,12 @@ def _compute_sra_score(
     # RVOL
     if rvol_spike:
         score += 35
-        signals.append(f"Volume spike +{rvol_value:.0%} of avg (+35)")
+        signals.append(f"Volume spike {rvol_value:.1f}x avg (+35)")
 
-    # Regime
-    regime_pts = {"bear": 15, "bull": 10, "neutral": 0}.get(regime, 0)
-    if regime_pts:
-        score += regime_pts
-        signals.append(f"Market {regime.upper()} (+{regime_pts})")
+    # Regime — neutral gets 5 now (was 0, penalised unfairly)
+    regime_pts = {"bear": 15, "bull": 10, "neutral": 5}.get(regime, 5)
+    score += regime_pts
+    signals.append(f"Market {regime.upper()} (+{regime_pts})")
 
     # Sector
     if sector_positive:
@@ -233,7 +267,7 @@ def _compute_sra_score(
         score += 3
         signals.append(f"RSI {rsi_val:.0f} — mild oversold (+3)")
 
-    # Dry Volume (volume drying before swing)
+    # Dry Volume (volume drying before swing — accumulation signature)
     rvol_before = rvol_series.iloc[max(0, sl_idx - 10): sl_idx]
     if len(rvol_before) >= 3 and (rvol_before < 0.7).any():
         score += 3
@@ -260,8 +294,6 @@ def _compute_sra_score(
 def compute_sra_breadth(all_dfs: dict[str, pd.DataFrame]) -> tuple[str, float]:
     """
     يحسب Regime و Breadth% من % الأسهم فوق EMA50.
-    متوافق مع الـ Walk Forward Validation.
-
     يرجع: (regime, breadth_pct)
     """
     above, total = 0, 0
@@ -300,6 +332,7 @@ def detect_sra_setup(
     breadth_pct:     float,
     sector_positive: bool,
     min_grade:       str = "B",
+    ticker:          str = "",
 ) -> Optional[SRAResult]:
     """
     يفحص DataFrame لسهم واحد ويرجع أفضل SRA setup حديث، أو None.
@@ -311,8 +344,11 @@ def detect_sra_setup(
     breadth_pct     : 0-100
     sector_positive : هل الـ EMA50 للقطاع في اتجاه صاعد؟
     min_grade       : الحد الأدنى للـ Grade المقبول
+    ticker          : اسم السهم للـ logging
     """
-    if df is None or len(df) < 60:
+    if df is None or len(df) < 40:
+        if ticker:
+            logger.debug("SRA[%s]: skipped — only %d rows (need 40)", ticker, len(df) if df is not None else 0)
         return None
 
     grade_rank = {"A+": 3, "A": 2, "B": 1, "C": 0}
@@ -323,19 +359,21 @@ def detect_sra_setup(
     df.columns = [c.lower() for c in df.columns]
     for col in ("open", "high", "low", "close", "volume"):
         if col not in df.columns:
+            if ticker:
+                logger.debug("SRA[%s]: missing column '%s'", ticker, col)
             return None
 
     rvol_series = _compute_rvol(df["volume"])
     atr_series  = _compute_atr(df)
 
-    swing_idxs = _detect_recent_swing_lows(df)
+    swing_idxs = _detect_recent_swing_lows(df, ticker=ticker)
     if not swing_idxs:
         return None
 
     best: Optional[SRAResult] = None
 
     for sl_idx in swing_idxs:
-        has_spike, rvol_val = _has_rvol_spike(rvol_series, sl_idx)
+        has_spike, rvol_val = _has_rvol_spike(rvol_series, sl_idx, ticker=ticker)
         if not has_spike:
             continue
 
@@ -345,6 +383,11 @@ def detect_sra_setup(
         )
 
         if grade_rank.get(grade, 0) < min_rank:
+            if ticker:
+                logger.debug(
+                    "SRA[%s]: grade %s below min %s (score=%.0f)",
+                    ticker, grade, min_grade, score,
+                )
             continue
 
         rsi_val    = float(_compute_rsi(df["close"]).iloc[sl_idx])
@@ -356,7 +399,7 @@ def detect_sra_setup(
         balanced_p = PROFILES["BALANCED"]
 
         result = SRAResult(
-            ticker                = "",   # يُضاف خارجياً
+            ticker                = ticker,
             setup_type            = "SRA",
             grade                 = grade,
             score                 = score,
@@ -379,5 +422,11 @@ def detect_sra_setup(
 
         if best is None or score > best.score:
             best = result
+
+    if ticker and best:
+        logger.info(
+            "SRA[%s]: SIGNAL %s score=%.0f rvol=%.1fx regime=%s",
+            ticker, best.opp_type, best.score, best.rvol_spike, regime,
+        )
 
     return best

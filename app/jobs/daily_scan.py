@@ -240,6 +240,7 @@ def run_daily_scan(app) -> None:
                             breadth_pct     = breadth_pct,
                             sector_positive = sector_positive,
                             min_grade       = "B",
+                            ticker          = stock.symbol,
                         )
 
                         if sra is not None:
