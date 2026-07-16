@@ -469,6 +469,64 @@ def trigger_scan():
     return jsonify({"ok": True, "message": "daily scan started in background"}), 200
 
 
+# ── KB Snapshot (weekly — called by GitHub Actions every Thursday) ────────────
+
+@admin_bp.get("/api/admin/kb-snapshot")
+def kb_snapshot():
+    """Return a full Knowledge Base snapshot for archiving. Protected by BOT_API_KEY."""
+    err = _check_key()
+    if err:
+        return err
+
+    from app.models.opportunity import Opportunity
+
+    closed = (
+        Opportunity.query
+        .filter(
+            Opportunity.opp_type.like("SRA_%"),
+            Opportunity.outcome.in_(["WIN", "LOSS", "EXPIRED"]),
+        )
+        .all()
+    )
+
+    total   = len(closed)
+    wins    = [o for o in closed if o.outcome == "WIN"]
+    losses  = [o for o in closed if o.outcome == "LOSS"]
+    expired = [o for o in closed if o.outcome == "EXPIRED"]
+
+    decided  = len(wins) + len(losses)
+    win_rate = round(len(wins) / decided * 100, 1) if decided > 0 else None
+
+    pnls     = [o.pnl_pct for o in closed if o.pnl_pct is not None]
+    avg_pnl  = round(sum(pnls) / len(pnls), 2) if pnls else None
+
+    grade_breakdown = {}
+    for o in closed:
+        g = o.opp_type.replace("SRA_", "")
+        if g not in grade_breakdown:
+            grade_breakdown[g] = {"total": 0, "wins": 0, "losses": 0, "expired": 0}
+        grade_breakdown[g]["total"] += 1
+        if o.outcome == "WIN":
+            grade_breakdown[g]["wins"] += 1
+        elif o.outcome == "LOSS":
+            grade_breakdown[g]["losses"] += 1
+        else:
+            grade_breakdown[g]["expired"] += 1
+
+    return jsonify({
+        "snapshot_date": date.today().isoformat(),
+        "size":          total,
+        "win_rate":      win_rate,
+        "avg_pnl_pct":   avg_pnl,
+        "breakdown": {
+            "wins":    len(wins),
+            "losses":  len(losses),
+            "expired": len(expired),
+        },
+        "by_grade": grade_breakdown,
+    })
+
+
 # ── Sharia sync (EGX rebalance every ~6 months) ───────────────────────────────
 
 @admin_bp.get("/api/admin/sharia")
