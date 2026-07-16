@@ -146,10 +146,11 @@ def _detect_recent_swing_lows(df: pd.DataFrame, ticker: str = "") -> list[int]:
     """
     يكتشف قيعان محلية حديثة.
 
-    تغييرات v2:
+    تغييرات v3:
     - SWING_LOOKBACK مخفّض من 5 لـ 3 → يشوف قيعان أحدث
     - tolerance 0.5% → يقبل Double Bottom والقيعان القريبة
-    - quantile من 0.30 لـ 0.40 → يقبل قيعان أكثر واقعية
+    - pullback condition بدل quantile → يشتغل صح في bull و bear معاً
+      (المنطق: السهم انسحب ≥3% من أعلى close في آخر 15 بار)
     """
     n      = len(df)
     swings = []
@@ -158,7 +159,7 @@ def _detect_recent_swing_lows(df: pd.DataFrame, ticker: str = "") -> list[int]:
 
     rejected_not_min    = 0
     rejected_neighbors  = 0
-    rejected_quantile   = 0
+    rejected_pullback   = 0
 
     for i in range(start, n - lb):
         low_i      = df["low"].iloc[i]
@@ -178,18 +179,20 @@ def _detect_recent_swing_lows(df: pd.DataFrame, ticker: str = "") -> list[int]:
             rejected_neighbors += 1
             continue
 
-        # Must be in the lower 40% of the previous 10 bars (loosened from 30%)
-        prev10 = df["low"].iloc[max(0, i - 10): i]
-        if len(prev10) >= 3 and low_i > float(prev10.quantile(0.40)):
-            rejected_quantile += 1
+        # Must be a meaningful pullback — at least 3% below the recent peak close
+        # Works in bull AND bear: captures pullbacks in uptrends + recoveries in downtrends
+        recent_high = float(df["close"].iloc[max(0, i - 15): i].max()) if i > 0 else low_i
+        pullback_pct = (recent_high - low_i) / (recent_high + 1e-10)
+        if pullback_pct < 0.03:
+            rejected_pullback += 1
             continue
 
         swings.append(i)
 
     if ticker and not swings:
         logger.debug(
-            "SRA[%s]: no swings — rejected: not_min=%d neighbors=%d quantile=%d (scanned %d-%d of %d)",
-            ticker, rejected_not_min, rejected_neighbors, rejected_quantile, start, n - lb, n,
+            "SRA[%s]: no swings — rejected: not_min=%d neighbors=%d pullback<3%%=%d (scanned %d-%d of %d)",
+            ticker, rejected_not_min, rejected_neighbors, rejected_pullback, start, n - lb, n,
         )
 
     return swings
