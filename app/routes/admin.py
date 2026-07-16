@@ -469,6 +469,22 @@ def trigger_scan():
     return jsonify({"ok": True, "message": "daily scan started in background"}), 200
 
 
+# ── Scan logs ─────────────────────────────────────────────────────────────────
+
+@admin_bp.get("/api/admin/scan-logs")
+def scan_logs():
+    """Last N daily scan log entries. Protected by BOT_API_KEY."""
+    err = _check_key()
+    if err:
+        return err
+
+    from app.models.scan_log import ScanLog
+
+    limit = min(int(request.args.get("limit", 10)), 50)
+    logs  = ScanLog.query.order_by(ScanLog.run_date.desc(), ScanLog.id.desc()).limit(limit).all()
+    return jsonify({"count": len(logs), "logs": [l.to_dict() for l in logs]})
+
+
 # ── KB Snapshot (weekly — called by GitHub Actions every Thursday) ────────────
 
 @admin_bp.get("/api/admin/kb-snapshot")
