@@ -625,3 +625,212 @@ def trend_status():
             "sra":   _outcomes("SRA_%",   since_30),
         },
     })
+
+
+# ── Trend Monitor (public — Admin dual-run dashboard) ─────────────────────────
+# Read-only aggregate, no auth (same pattern as /api/admin/health). Additive:
+# nothing else changes. Families are derived from opp_type prefix (no schema).
+
+_RESEARCH_EXPECTATIONS = {
+    # From docs/research/. Live outcomes are GROSS (no slippage), so these are
+    # gross-ish reference bands — used only to flag large drift, not exact match.
+    "signals_per_day_min": 1.0,
+    "signals_per_day_max": 3.0,
+    "win_rate":   46.0,
+    "pf":         1.6,
+    "avg_return": 1.3,
+}
+
+
+def _opp_family(opp_type: str) -> str:
+    ot = opp_type or ""
+    if ot.startswith("TREND_"):
+        return "trend"
+    if ot.startswith("SRA_"):
+        return "sra"
+    return "momentum"
+
+
+@admin_bp.get("/api/admin/trend-monitor")
+def trend_monitor():
+    """
+    Admin dual-run dashboard data (public, like /api/admin/health).
+    ?date=YYYY-MM-DD replays a past day (signals/pool/stats as of that date).
+    """
+    from app.models.opportunity import Opportunity
+    from app.models.score       import RadarScoreHistory
+    from app.models.scan_log    import ScanLog
+
+    date_arg = request.args.get("date")
+    try:
+        sel = datetime.strptime(date_arg, "%Y-%m-%d").date() if date_arg else date.today()
+    except ValueError:
+        sel = date.today()
+    since_30 = sel - timedelta(days=30)
+
+    # ── Signals on the selected day (with full details) ───────────────────────
+    day_opps = Opportunity.query.filter_by(run_date=sel).all()
+
+    def _sig(o):
+        snap = o.feature_snapshot or {}
+        return {
+            "symbol":   o.stock.symbol if o.stock else None,
+            "opp_type": o.opp_type,
+            "grade":    (o.opp_type or "_").split("_")[-1],
+            "score":    o.radar_score,
+            "quality":  o.signal_quality,
+            "entry":    o.entry_price,
+            "sl":       o.sl_price,
+            "tp1":      o.tp1_price,
+            "tp2":      o.tp2_price,
+            "rr":       o.rr_ratio,
+            "outcome":  o.outcome,
+            "adx":      snap.get("adx"),
+            "rsi":      snap.get("rsi"),
+            "ema_fast": snap.get("ema_fast"),
+            "ema_slow": snap.get("ema_slow"),
+            "atr":      snap.get("atr"),
+            "adt":      snap.get("adt"),
+            "reasons":  snap.get("reasons", []),
+        }
+
+    trend_sigs = [_sig(o) for o in day_opps if _opp_family(o.opp_type) == "trend"]
+    sra_sigs   = [_sig(o) for o in day_opps if _opp_family(o.opp_type) == "sra"]
+
+    # Radar Score pool (score >= 60) on the selected day
+    pool_rows = (
+        db.session.query(RadarScoreHistory, Stock)
+        .join(Stock, RadarScoreHistory.stock_id == Stock.id)
+        .filter(RadarScoreHistory.run_date == sel, RadarScoreHistory.score >= 60)
+        .order_by(RadarScoreHistory.score.desc())
+        .all()
+    )
+    radar_pool = [
+        {"symbol": s.symbol, "score": round(r.score, 1) if r.score is not None else None,
+         "adx": r.adx, "rsi": r.rsi}
+        for r, s in pool_rows
+    ]
+
+    # ── Overlap on the selected day ───────────────────────────────────────────
+    trend_ids = {o.stock_id for o in day_opps if _opp_family(o.opp_type) == "trend"}
+    sra_ids   = {o.stock_id for o in day_opps if _opp_family(o.opp_type) == "sra"}
+    radar_ids = {r.stock_id for r, _ in pool_rows}
+    daily_stats = {
+        "trend":             len(trend_ids),
+        "sra":               len(sra_ids),
+        "radar":             len(radar_ids),
+        "overlap_trend_sra": len(trend_ids & sra_ids),
+        "trend_only":        len(trend_ids - sra_ids - radar_ids),
+        "sra_only":          len(sra_ids - trend_ids - radar_ids),
+        "radar_only":        len(radar_ids - trend_ids - sra_ids),
+    }
+
+    # ── Last 30 days table (counts + trend/sra overlap per day) ───────────────
+    win_opps = Opportunity.query.filter(
+        Opportunity.run_date >= since_30, Opportunity.run_date <= sel
+    ).all()
+    radar_30 = (
+        db.session.query(RadarScoreHistory.run_date, RadarScoreHistory.stock_id)
+        .filter(RadarScoreHistory.run_date >= since_30,
+                RadarScoreHistory.run_date <= sel,
+                RadarScoreHistory.score >= 60)
+        .all()
+    )
+    by_day: dict = {}
+    for o in win_opps:
+        bucket = by_day.setdefault(o.run_date, {"trend": set(), "sra": set(), "radar": set()})
+        fam = _opp_family(o.opp_type)
+        if fam in ("trend", "sra"):
+            bucket[fam].add(o.stock_id)
+    for rd, sid in radar_30:
+        by_day.setdefault(rd, {"trend": set(), "sra": set(), "radar": set()})["radar"].add(sid)
+    last_30 = [
+        {
+            "date":    d.isoformat(),
+            "trend":   len(v["trend"]),
+            "sra":     len(v["sra"]),
+            "radar":   len(v["radar"]),
+            "overlap": len(v["trend"] & v["sra"]),
+        }
+        for d, v in sorted(by_day.items(), reverse=True)
+    ]
+
+    # ── Outcome comparison (all-time, by family) ──────────────────────────────
+    def _family_outcomes(prefix):
+        rows    = Opportunity.query.filter(Opportunity.opp_type.like(prefix)).all()
+        pending = [o for o in rows if o.outcome == "PENDING"]
+        closed  = [o for o in rows if o.outcome in ("WIN", "LOSS")]
+        wins    = [o for o in closed if o.outcome == "WIN"]
+        losses  = [o for o in closed if o.outcome == "LOSS"]
+        gains   = sum(o.pnl_pct for o in wins   if o.pnl_pct is not None)
+        drops   = sum(o.pnl_pct for o in losses if o.pnl_pct is not None)
+        pnls    = [o.pnl_pct   for o in closed if o.pnl_pct   is not None]
+        holds   = [o.hold_days for o in closed if o.hold_days is not None]
+        return {
+            "pending":       len(pending),
+            "closed":        len(closed),
+            "wins":          len(wins),
+            "losses":        len(losses),
+            "win_rate":      round(len(wins) / len(closed) * 100, 1) if closed else None,
+            "avg_return":    round(sum(pnls) / len(pnls), 2) if pnls else None,
+            "pf":            round(gains / abs(drops), 2) if drops else (None if not closed else 999),
+            "avg_hold_days": round(sum(holds) / len(holds), 1) if holds else None,
+        }
+
+    trend_out = _family_outcomes("TREND_%")
+    sra_out   = _family_outcomes("SRA_%")
+
+    # ── Research validation (drift detector) ──────────────────────────────────
+    sig_per_day = round(sum(x["trend"] for x in last_30) / len(last_30), 2) if last_30 else None
+    exp   = _RESEARCH_EXPECTATIONS
+    drift = []
+    if trend_out["closed"] >= 10:
+        if trend_out["win_rate"] is not None and abs(trend_out["win_rate"] - exp["win_rate"]) > 15:
+            drift.append("win_rate")
+        if trend_out["pf"] is not None and trend_out["pf"] != 999 and abs(trend_out["pf"] - exp["pf"]) > 0.5:
+            drift.append("pf")
+    if sig_per_day is not None and (sig_per_day < 0.3 or sig_per_day > 6):
+        drift.append("signals_per_day")
+
+    validation = {
+        "expected": exp,
+        "actual": {
+            "signals_per_day": sig_per_day,
+            "win_rate":        trend_out["win_rate"],
+            "pf":              trend_out["pf"],
+            "avg_return":      trend_out["avg_return"],
+        },
+        "sample_closed": trend_out["closed"],
+        "status":  "collecting" if trend_out["closed"] < 10 else ("drift" if drift else "match"),
+        "drift_fields": drift,
+    }
+
+    # ── Scan logs (last 10 runs, trend count derived) ─────────────────────────
+    scan_logs = []
+    for lg in ScanLog.query.order_by(ScanLog.run_date.desc()).limit(10).all():
+        t_cnt = Opportunity.query.filter(
+            Opportunity.opp_type.like("TREND_%"), Opportunity.run_date == lg.run_date
+        ).count()
+        scan_logs.append({
+            "run_date":         lg.run_date.isoformat() if lg.run_date else None,
+            "status":           lg.status,
+            "stocks_scanned":   lg.stocks_scanned,
+            "trend":            t_cnt,
+            "sra":              getattr(lg, "sra_signals", None),
+            "momentum":         getattr(lg, "momentum_signals", None),
+            "started_at":       lg.started_at.isoformat()  if getattr(lg, "started_at", None)  else None,
+            "finished_at":      lg.finished_at.isoformat() if getattr(lg, "finished_at", None) else None,
+            "duration_seconds": getattr(lg, "duration_seconds", None),
+        })
+
+    return jsonify({
+        "as_of":     date.today().isoformat(),
+        "date":      sel.isoformat(),
+        "is_replay": sel != date.today(),
+        "today":     {"trend": trend_sigs, "sra": sra_sigs, "radar_pool": radar_pool},
+        "daily_stats":  daily_stats,
+        "last_30_days": last_30,
+        "outcomes":     {"trend": trend_out, "sra": sra_out},
+        "validation":   validation,
+        "scan_logs":    scan_logs,
+    })
