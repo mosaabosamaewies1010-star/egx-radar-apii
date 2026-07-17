@@ -2,14 +2,17 @@
 Background job: scan all active stocks, compute Radar Scores, detect Opportunities.
 Runs at 15:30 Cairo (after regime_job has committed today's regime).
 
-Strategy Layer
+Strategy Layer  (migration to Trend-Initiation — see docs/research/)
 --------------
-PRIMARY  — SRA Engine (Smart Recovery Accumulation, Walk-Forward validated)
-SECONDARY — Momentum Radar (ADX/RSI/Williams%, kept as Setup #2)
+PRIMARY   — Trend Initiation Engine (fresh EMA20/50 cross + ADX≥20 + RSI>50; net PF ~1.57)
+SECONDARY — SRA Engine (Smart Recovery Accumulation) — bear/crisis module
+LEGACY    — Momentum Radar (radar_score) — still runs during dual-run; the score is
+            explanation-only (research showed it is inverted as an entry gate)
 
-Both run every day. They write separate Opportunity records with different opp_type.
-Old Momentum records: opp_type = "Breakout" | "Momentum" | "Swing" | "Sharia"
-New SRA records:      opp_type = "SRA_A+"   | "SRA_A"   | "SRA_B"
+All run every day, writing separate Opportunity records by opp_type prefix:
+  Momentum: "Breakout" | "Momentum" | "Swing" | "Sharia"
+  SRA:      "SRA_A+"   | "SRA_A"    | "SRA_B"
+  Trend:    "TREND_A+" | "TREND_A"  | "TREND_B"
 """
 import logging
 from datetime import date, datetime, timezone
@@ -50,6 +53,14 @@ def run_daily_scan(app) -> None:
             except ImportError:
                 logger.warning("daily_scan: sra_engine not available — skipping SRA pass")
                 _SRA_AVAILABLE = False
+
+            # Trend Initiation Engine — PRIMARY (imported with guard so scan still runs)
+            try:
+                from app.services.trend_engine import detect_trend_initiation
+                _TREND_AVAILABLE = True
+            except ImportError:
+                logger.warning("daily_scan: trend_engine not available — skipping TREND pass")
+                _TREND_AVAILABLE = False
 
             stocks = Stock.query.filter_by(is_active=True).all()
 
@@ -312,6 +323,49 @@ def run_daily_scan(app) -> None:
                                     stock.symbol, sra.opp_type, sra.score,
                                 )
 
+                    # ── TREND PASS — PRIMARY engine, own idempotency check ────
+                    # Runs independently (opp_type prefix "TREND_") so it coexists
+                    # with SRA + momentum during the dual-run migration.
+                    if _TREND_AVAILABLE:
+                        already_trend = Opportunity.query.filter(
+                            Opportunity.stock_id == stock.id,
+                            Opportunity.run_date == today,
+                            Opportunity.opp_type.like("TREND_%"),
+                        ).first()
+
+                        if not already_trend:
+                            trend = detect_trend_initiation(
+                                df          = df,
+                                breadth_pct = breadth_pct,
+                                ticker      = stock.symbol,
+                            )
+
+                            if trend is not None:
+                                t_sl  = min(trend.fast_sl, trend.balanced_sl)
+                                t_rr1 = ((trend.fast_tp - trend.entry_price) /
+                                         (trend.entry_price - t_sl)) if trend.entry_price > t_sl else None
+                                t_quality = {"A+": "HIGH", "A": "MEDIUM", "B": "LOW"}
+
+                                db.session.add(Opportunity(
+                                    stock_id         = stock.id,
+                                    run_date         = today,
+                                    opp_type         = trend.opp_type,
+                                    entry_price      = trend.entry_price,
+                                    tp1_price        = trend.fast_tp,
+                                    tp2_price        = trend.balanced_tp,
+                                    sl_price         = t_sl,
+                                    rr_ratio         = round(t_rr1, 2) if t_rr1 else None,
+                                    max_hold_days    = trend.balanced_max_bars,
+                                    radar_score      = trend.trend_strength,
+                                    signal_quality   = t_quality.get(trend.grade, "LOW"),
+                                    outcome          = "PENDING",
+                                    feature_snapshot = trend.feature_snapshot(),
+                                ))
+                                logger.info(
+                                    "daily_scan: TREND %s — %s (strength=%.0f)",
+                                    stock.symbol, trend.opp_type, trend.trend_strength,
+                                )
+
                     db.session.commit()
 
                 except Exception:
@@ -330,13 +384,24 @@ def run_daily_scan(app) -> None:
             sra_count = Opportunity.query.filter(
                 Opportunity.opp_type.like("SRA_%"), Opportunity.run_date == today
             ).count()
+            trend_count = Opportunity.query.filter(
+                Opportunity.opp_type.like("TREND_%"), Opportunity.run_date == today
+            ).count()
+            # Momentum = everything that is neither SRA nor TREND
             momentum_count = Opportunity.query.filter(
-                ~Opportunity.opp_type.like("SRA_%"), Opportunity.run_date == today
+                ~Opportunity.opp_type.like("SRA_%"),
+                ~Opportunity.opp_type.like("TREND_%"),
+                Opportunity.run_date == today,
             ).count()
             kb_size = Opportunity.query.filter(
                 Opportunity.opp_type.like("SRA_%"),
                 Opportunity.outcome.in_(["WIN", "LOSS"])
             ).count()
+
+            logger.info(
+                "daily_scan: signals — trend=%d, sra=%d, momentum=%d",
+                trend_count, sra_count, momentum_count,
+            )
 
             scan_log.stocks_scanned   = success + skip + fail
             scan_log.sra_signals      = sra_count
