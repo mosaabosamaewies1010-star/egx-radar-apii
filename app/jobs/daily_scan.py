@@ -398,10 +398,24 @@ def run_daily_scan(app) -> None:
                 Opportunity.outcome.in_(["WIN", "LOSS"])
             ).count()
 
-            logger.info(
-                "daily_scan: signals — trend=%d, sra=%d, momentum=%d",
-                trend_count, sra_count, momentum_count,
-            )
+            # ── Dual-run summary (temporary monitoring during migration) ──────
+            trend_syms = [
+                o.stock.symbol for o in Opportunity.query.filter(
+                    Opportunity.opp_type.like("TREND_%"), Opportunity.run_date == today
+                ).all()
+            ]
+            sra_syms = [
+                o.stock.symbol for o in Opportunity.query.filter(
+                    Opportunity.opp_type.like("SRA_%"), Opportunity.run_date == today
+                ).all()
+            ]
+            logger.info("daily_scan: ===== DUAL-RUN SUMMARY =====")
+            logger.info("daily_scan: TREND (%d): %s", trend_count, ", ".join(trend_syms) or "-")
+            logger.info("daily_scan: SRA   (%d): %s", sra_count, ", ".join(sra_syms) or "-")
+            logger.info("daily_scan: MOMENTUM (%d)", momentum_count)
+            logger.info("daily_scan: scanned=%d success=%d skip=%d fail=%d",
+                        success + skip + fail, success, skip, fail)
+            logger.info("daily_scan: ============================")
 
             scan_log.stocks_scanned   = success + skip + fail
             scan_log.sra_signals      = sra_count

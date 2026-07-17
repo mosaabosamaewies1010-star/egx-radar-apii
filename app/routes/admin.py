@@ -560,3 +560,68 @@ def sync_sharia_stocks():
         "not_in_db":  sorted(not_in_db),
         "message":    f"+{len(added)} sharia, -{len(removed)} sharia, {len(not_in_db)} symbols not found in DB",
     })
+
+
+@admin_bp.get("/api/admin/trend-status")
+def trend_status():
+    """
+    Dual-run monitoring — trend vs SRA vs momentum signals + outcomes.
+
+    Families are derived from the opp_type prefix (no schema dependency):
+      TREND_* | SRA_* | everything else = momentum.
+    Use this to watch the Trend-Initiation migration without reading the DB or logs.
+    """
+    err = _check_key()
+    if err:
+        return err
+
+    from app.models.opportunity import Opportunity
+
+    today    = date.today()
+    since_30 = today - timedelta(days=30)
+
+    def _count(pattern, *, run_date=None, since=None, exclude=None):
+        q = Opportunity.query
+        if pattern:
+            q = q.filter(Opportunity.opp_type.like(pattern))
+        for ex in (exclude or []):
+            q = q.filter(~Opportunity.opp_type.like(ex))
+        if run_date is not None:
+            q = q.filter(Opportunity.run_date == run_date)
+        if since is not None:
+            q = q.filter(Opportunity.run_date >= since)
+        return q.count()
+
+    def _outcomes(pattern, since):
+        rows = Opportunity.query.filter(
+            Opportunity.opp_type.like(pattern),
+            Opportunity.run_date >= since,
+            Opportunity.outcome.in_(["WIN", "LOSS"]),
+        ).all()
+        wins   = sum(1 for o in rows if o.outcome == "WIN")
+        gains  = sum(o.pnl_pct for o in rows if o.pnl_pct and o.pnl_pct > 0)
+        drops  = sum(o.pnl_pct for o in rows if o.pnl_pct and o.pnl_pct <= 0)
+        return {
+            "closed":   len(rows),
+            "wins":     wins,
+            "losses":   len(rows) - wins,
+            "win_rate": round(wins / len(rows) * 100, 1) if rows else None,
+            "pf":       round(gains / abs(drops), 2) if drops else (None if not rows else 999),
+        }
+
+    return jsonify({
+        "as_of": today.isoformat(),
+        "today": {
+            "trend":    _count("TREND_%", run_date=today),
+            "sra":      _count("SRA_%",   run_date=today),
+            "momentum": _count(None, run_date=today, exclude=["TREND_%", "SRA_%"]),
+        },
+        "last_30_days": {
+            "trend": _count("TREND_%", since=since_30),
+            "sra":   _count("SRA_%",   since=since_30),
+        },
+        "outcomes_30d": {
+            "trend": _outcomes("TREND_%", since_30),
+            "sra":   _outcomes("SRA_%",   since_30),
+        },
+    })
