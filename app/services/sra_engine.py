@@ -34,7 +34,7 @@ SWING_LOOKBACK  = 3     # bars each side — reduced from 5 to catch more recent
 SCAN_WINDOW     = 12    # how many recent bars to scan — widened slightly
 RVOL_THRESHOLD  = 1.5   # minimum spike multiplier
 RVOL_WINDOW     = 5     # bars to check for RVOL spike — widened from 3
-MAX_SWING_AGE   = 5     # reject swings older than 5 bars — keeps entry price fresh
+MAX_PRICE_DRIFT = 0.08  # reject if current price > 8% above entry (setup already played out)
 
 # Exit profiles — frozen from Walk Forward validation
 PROFILES = {
@@ -385,11 +385,9 @@ def detect_sra_setup(
 
     best: Optional[SRAResult] = None
 
-    for sl_idx in swing_idxs:
-        # Reject stale setups — entry price is based on sl_idx close price
-        if n - 1 - sl_idx > MAX_SWING_AGE:
-            continue
+    current_price = float(df["close"].iloc[-1])
 
+    for sl_idx in swing_idxs:
         has_spike, rvol_val = _has_rvol_spike(rvol_series, sl_idx, ticker=ticker)
         if not has_spike:
             continue
@@ -411,6 +409,16 @@ def detect_sra_setup(
         atr_val    = float(atr_series.iloc[sl_idx]) if not np.isnan(atr_series.iloc[sl_idx]) else float(df["close"].iloc[sl_idx]) * 0.02
         swing_low  = float(df["low"].iloc[sl_idx])
         entry      = round(float(df["close"].iloc[sl_idx]) * 1.002, 4)
+
+        # Reject if current price is already >8% above entry — setup has played out
+        drift = (current_price - entry) / (entry + 1e-10)
+        if drift > MAX_PRICE_DRIFT:
+            if ticker:
+                logger.debug(
+                    "SRA[%s]: stale setup at sl_idx=%d — entry=%.4f current=%.4f drift=+%.1f%%",
+                    ticker, sl_idx, entry, current_price, drift * 100,
+                )
+            continue
 
         fast_p     = PROFILES["FAST"]
         balanced_p = PROFILES["BALANCED"]
