@@ -766,6 +766,14 @@ def trend_monitor():
         drops   = sum(o.pnl_pct for o in losses if o.pnl_pct is not None)
         pnls    = [o.pnl_pct   for o in closed if o.pnl_pct   is not None]
         holds   = [o.hold_days for o in closed if o.hold_days is not None]
+        # Max drawdown of the sequential closed-trade equity curve (by close date)
+        seq = sorted([o for o in closed if o.pnl_pct is not None],
+                     key=lambda o: (o.closed_at or o.run_date or date.min))
+        cum = peak = maxdd = 0.0
+        for o in seq:
+            cum += o.pnl_pct
+            peak = max(peak, cum)
+            maxdd = max(maxdd, peak - cum)
         return {
             "pending":       len(pending),
             "closed":        len(closed),
@@ -775,6 +783,7 @@ def trend_monitor():
             "avg_return":    round(sum(pnls) / len(pnls), 2) if pnls else None,
             "pf":            round(gains / abs(drops), 2) if drops else (None if not closed else 999),
             "avg_hold_days": round(sum(holds) / len(holds), 1) if holds else None,
+            "max_dd":        round(maxdd, 1) if seq else None,
         }
 
     trend_out = _family_outcomes("TREND_%")
@@ -823,12 +832,62 @@ def trend_monitor():
             "duration_seconds": getattr(lg, "duration_seconds", None),
         })
 
+    # ── Overlap with actual symbols (selected day) ────────────────────────────
+    sym_of = {o.stock_id: (o.stock.symbol if o.stock else str(o.stock_id)) for o in day_opps}
+    trend_syms = {sym_of[i] for i in trend_ids}
+    sra_syms   = {sym_of[i] for i in sra_ids}
+    overlap = {
+        "trend_only": sorted(trend_syms - sra_syms),
+        "both":       sorted(trend_syms & sra_syms),
+        "sra_only":   sorted(sra_syms - trend_syms),
+    }
+
+    # ── Research status ───────────────────────────────────────────────────────
+    last_log    = ScanLog.query.order_by(ScanLog.run_date.desc()).first()
+    last_closed = (Opportunity.query.filter(Opportunity.closed_at.isnot(None))
+                   .order_by(Opportunity.closed_at.desc()).first())
+    research_status = {
+        "current_engine":      "SRA (primary) — migrating to Trend Initiation",
+        "trend_version":       "TREND_v1",
+        "research_version":    "v1.0",
+        "last_scan":           last_log.run_date.isoformat() if last_log and last_log.run_date else None,
+        "last_outcome_update": last_closed.closed_at.isoformat() if last_closed and last_closed.closed_at else None,
+        "stocks_analyzed":     last_log.stocks_scanned if last_log else None,
+    }
+
+    # ── Research Gate (promotion criteria) ────────────────────────────────────
+    trend_active_days = len({x["date"] for x in last_30 if x["trend"] > 0})
+    recent_failed = ScanLog.query.filter(
+        ScanLog.status == "failed", ScanLog.run_date >= since_30
+    ).count() > 0
+    t_pf, s_pf = trend_out["pf"], sra_out["pf"]
+    if trend_out["closed"] >= 5 and sra_out["closed"] >= 5 and t_pf is not None and s_pf is not None:
+        pf_beats = "pass" if (t_pf != 999 and t_pf > s_pf) else "fail"
+    else:
+        pf_beats = "wait"
+    gate = [
+        {"criterion": "Trend يعمل بدون أخطاء", "status": "fail" if recent_failed else "pass"},
+        {"criterion": "Research = Production",
+         "status": "pass" if validation["status"] == "match" else ("wait" if validation["status"] == "collecting" else "fail")},
+        {"criterion": "لا يوجد Drift",
+         "status": "pass" if not validation["drift_fields"] else "fail"},
+        {"criterion": "14 يوم تشغيل متواصل",
+         "status": "pass" if trend_active_days >= 14 else "wait", "detail": f"{trend_active_days}/14"},
+        {"criterion": "PF أعلى من SRA", "status": pf_beats},
+    ]
+    gate_ready = all(g["status"] == "pass" for g in gate)
+    gate.append({"criterion": "جاهز للتحويل إلى Primary Engine",
+                 "status": "pass" if gate_ready else "wait"})
+
     return jsonify({
         "as_of":     date.today().isoformat(),
         "date":      sel.isoformat(),
         "is_replay": sel != date.today(),
+        "research_status": research_status,
+        "research_gate":   gate,
         "today":     {"trend": trend_sigs, "sra": sra_sigs, "radar_pool": radar_pool},
         "daily_stats":  daily_stats,
+        "overlap":      overlap,
         "last_30_days": last_30,
         "outcomes":     {"trend": trend_out, "sra": sra_out},
         "validation":   validation,
