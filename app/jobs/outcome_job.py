@@ -56,8 +56,9 @@ def _classify_exit(opp, last_price: float) -> tuple[str, str, float] | None:
 
 
 def _profile_used(opp, exit_reason: str) -> str | None:
-    """For SRA opps, determine which exit profile was hit (FAST or BALANCED)."""
-    if not (opp.opp_type or "").startswith("SRA_"):
+    """For dual-profile opps (SRA, TREND), determine which exit profile was hit.
+    Both use TP1 = FAST target (7%) and TP2 = BALANCED target (15%)."""
+    if not (opp.opp_type or "").startswith(("SRA_", "TREND_")):
         return None
     if exit_reason == "TP1":
         return "FAST"
