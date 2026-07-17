@@ -304,61 +304,7 @@ def analytics_summary():
         return err
 
     days = int(request.args.get("days", 7))
-    since_dt = datetime.now(timezone.utc) - timedelta(days=days)
-
-    total_events = AnalyticsEvent.query.filter(AnalyticsEvent.received_at >= since_dt).count()
-
-    page_views = (
-        AnalyticsEvent.query
-        .filter(
-            AnalyticsEvent.name == "page_view",
-            AnalyticsEvent.received_at >= since_dt,
-        )
-        .count()
-    )
-
-    event_breakdown = (
-        db.session.query(AnalyticsEvent.name, func.count(AnalyticsEvent.id))
-        .filter(AnalyticsEvent.received_at >= since_dt)
-        .group_by(AnalyticsEvent.name)
-        .order_by(func.count(AnalyticsEvent.id).desc())
-        .all()
-    )
-
-    top_pages = (
-        db.session.query(AnalyticsEvent.path, func.count(AnalyticsEvent.id))
-        .filter(
-            AnalyticsEvent.name == "page_view",
-            AnalyticsEvent.received_at >= since_dt,
-            AnalyticsEvent.path.isnot(None),
-        )
-        .group_by(AnalyticsEvent.path)
-        .order_by(func.count(AnalyticsEvent.id).desc())
-        .limit(10)
-        .all()
-    )
-
-    top_stocks = (
-        db.session.query(AnalyticsEvent.symbol, func.count(AnalyticsEvent.id))
-        .filter(
-            AnalyticsEvent.name == "stock_page_viewed",
-            AnalyticsEvent.received_at >= since_dt,
-            AnalyticsEvent.symbol.isnot(None),
-        )
-        .group_by(AnalyticsEvent.symbol)
-        .order_by(func.count(AnalyticsEvent.id).desc())
-        .limit(10)
-        .all()
-    )
-
-    return jsonify({
-        "period_days":      days,
-        "total_events":     total_events,
-        "page_views":       page_views,
-        "event_breakdown":  [{"name": name, "count": cnt} for name, cnt in event_breakdown],
-        "top_pages":        [{"path": path, "views": cnt} for path, cnt in top_pages],
-        "top_stocks":       [{"symbol": sym,  "views": cnt} for sym,  cnt in top_stocks],
-    })
+    return jsonify(_get_analytics_data(days))
 
 
 # ── Payments review (JWT owner) ───────────────────────────────────────────────
@@ -480,7 +426,10 @@ def scan_logs():
 
     from app.models.scan_log import ScanLog
 
-    limit = min(int(request.args.get("limit", 10)), 50)
+    try:
+        limit = min(int(request.args.get("limit", 10)), 50)
+    except (ValueError, TypeError):
+        limit = 10
     logs  = ScanLog.query.order_by(ScanLog.run_date.desc(), ScanLog.id.desc()).limit(limit).all()
     return jsonify({"count": len(logs), "logs": [l.to_dict() for l in logs]})
 
@@ -513,7 +462,8 @@ def kb_snapshot():
     decided  = len(wins) + len(losses)
     win_rate = round(len(wins) / decided * 100, 1) if decided > 0 else None
 
-    pnls     = [o.pnl_pct for o in closed if o.pnl_pct is not None]
+    # avg_pnl uses the same population as win_rate — decided trades only (excludes EXPIRED)
+    pnls     = [o.pnl_pct for o in wins + losses if o.pnl_pct is not None]
     avg_pnl  = round(sum(pnls) / len(pnls), 2) if pnls else None
 
     grade_breakdown = {}

@@ -34,6 +34,7 @@ SWING_LOOKBACK  = 3     # bars each side — reduced from 5 to catch more recent
 SCAN_WINDOW     = 12    # how many recent bars to scan — widened slightly
 RVOL_THRESHOLD  = 1.5   # minimum spike multiplier
 RVOL_WINDOW     = 5     # bars to check for RVOL spike — widened from 3
+MAX_SWING_AGE   = 5     # reject swings older than 5 bars — keeps entry price fresh
 
 # Exit profiles — frozen from Walk Forward validation
 PROFILES = {
@@ -126,7 +127,10 @@ def _compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
     d = close.diff()
     g = d.clip(lower=0).rolling(period).mean()
     l = (-d.clip(upper=0)).rolling(period).mean()
-    return 100 - 100 / (1 + g / (l + 1e-10))
+    rsi = 100 - 100 / (1 + g / (l + 1e-10))
+    # Flat/halted stock: both g and l near zero → RSI is meaningless, default to neutral
+    rsi[(g < 1e-8) & (l < 1e-8)] = 50.0
+    return rsi
 
 
 def _compute_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
@@ -161,6 +165,9 @@ def _detect_recent_swing_lows(df: pd.DataFrame, ticker: str = "") -> list[int]:
     rejected_neighbors  = 0
     rejected_pullback   = 0
 
+    # Precompute rolling max of prior 15 closes — O(n) instead of O(n×15)
+    rolling_max_prev = df["close"].rolling(15, min_periods=1).max().shift(1)
+
     for i in range(start, n - lb):
         low_i      = df["low"].iloc[i]
         window_low = df["low"].iloc[i - lb: i + lb + 1]
@@ -171,19 +178,19 @@ def _detect_recent_swing_lows(df: pd.DataFrame, ticker: str = "") -> list[int]:
             rejected_not_min += 1
             continue
 
-        # Must be lower than immediate neighbors
-        if low_i >= df["low"].iloc[i - 1]:
+        # Must be lower than (or equal to) immediate neighbors — > not >= allows double bottoms
+        if low_i > df["low"].iloc[i - 1]:
             rejected_neighbors += 1
             continue
-        if low_i >= df["low"].iloc[i + 1]:
+        if low_i > df["low"].iloc[i + 1]:
             rejected_neighbors += 1
             continue
 
         # Must be a meaningful pullback — at least 3% below the recent peak close
         # Works in bull AND bear: captures pullbacks in uptrends + recoveries in downtrends
-        recent_high = float(df["close"].iloc[max(0, i - 15): i].max()) if i > 0 else low_i
+        recent_high = float(rolling_max_prev.iloc[i]) if i > 0 else low_i
         pullback_pct = (recent_high - low_i) / (recent_high + 1e-10)
-        if pullback_pct < 0.03:
+        if pd.isna(recent_high) or pullback_pct < 0.03:
             rejected_pullback += 1
             continue
 
@@ -200,12 +207,12 @@ def _detect_recent_swing_lows(df: pd.DataFrame, ticker: str = "") -> list[int]:
 
 def _has_rvol_spike(rvol: pd.Series, sl_idx: int, ticker: str = "") -> tuple[bool, float]:
     """
-    يتحقق من RVOL spike في يوم القاع نفسه والـ bars بعده.
+    يتحقق من RVOL spike في الـ RVOL_WINDOW bars بعد القاع.
 
-    إصلاح v2: كان يبدأ من sl_idx+1 فكان يضيّع يوم الـ capitulation نفسه.
-    الآن يبدأ من sl_idx (يوم القاع).
+    يبدأ من sl_idx+1: يوم القاع (capitulation) غالبًا بيع مكثّف مش تراكم،
+    والتراكم الحقيقي يظهر في الأيام اللي بعده.
     """
-    window = rvol.iloc[sl_idx: sl_idx + RVOL_WINDOW + 1]
+    window = rvol.iloc[sl_idx + 1: sl_idx + RVOL_WINDOW + 1]
     if window.empty:
         return False, 0.0
     peak = float(window.max())
@@ -232,12 +239,15 @@ def _compute_sra_score(
     rvol_value:      float,
     regime:          str,
     sector_positive: bool,
+    rsi_val:         float = 50.0,
 ) -> tuple[float, str, list[str]]:
     """
     SRA Score v2 — مجمّد من Walk Forward Validation.
     الأوزان:
       SwingLow  25 | RVOL     35 | Regime 15/10/5
       Sector     8 | RSI   8/3/-5 | Dry Vol 3
+
+    rsi_val: precomputed by caller (avoid recomputing RSI per swing)
     """
     score   = 25.0
     signals = ["Swing Low confirmed (+25)"]
@@ -257,9 +267,7 @@ def _compute_sra_score(
         score += 8
         signals.append("Sector rising (+8)")
 
-    # RSI
-    rsi_series = _compute_rsi(df["close"])
-    rsi_val    = float(rsi_series.iloc[sl_idx])
+    # RSI (pre-computed by caller)
     if rsi_val < 25:
         score -= 5
         signals.append(f"RSI {rsi_val:.0f} — broken stock (-5)")
@@ -368,6 +376,8 @@ def detect_sra_setup(
 
     rvol_series = _compute_rvol(df["volume"])
     atr_series  = _compute_atr(df)
+    rsi_series  = _compute_rsi(df["close"])  # precompute once — reused per swing
+    n           = len(df)
 
     swing_idxs = _detect_recent_swing_lows(df, ticker=ticker)
     if not swing_idxs:
@@ -376,13 +386,18 @@ def detect_sra_setup(
     best: Optional[SRAResult] = None
 
     for sl_idx in swing_idxs:
+        # Reject stale setups — entry price is based on sl_idx close price
+        if n - 1 - sl_idx > MAX_SWING_AGE:
+            continue
+
         has_spike, rvol_val = _has_rvol_spike(rvol_series, sl_idx, ticker=ticker)
         if not has_spike:
             continue
 
+        rsi_at_sl  = float(rsi_series.iloc[sl_idx])
         score, grade, signals = _compute_sra_score(
             df, sl_idx, rvol_series, has_spike, rvol_val,
-            regime, sector_positive,
+            regime, sector_positive, rsi_at_sl,
         )
 
         if grade_rank.get(grade, 0) < min_rank:
@@ -393,7 +408,6 @@ def detect_sra_setup(
                 )
             continue
 
-        rsi_val    = float(_compute_rsi(df["close"]).iloc[sl_idx])
         atr_val    = float(atr_series.iloc[sl_idx]) if not np.isnan(atr_series.iloc[sl_idx]) else float(df["close"].iloc[sl_idx]) * 0.02
         swing_low  = float(df["low"].iloc[sl_idx])
         entry      = round(float(df["close"].iloc[sl_idx]) * 1.002, 4)
@@ -407,7 +421,7 @@ def detect_sra_setup(
             grade                 = grade,
             score                 = score,
             rvol_spike            = rvol_val,
-            rsi_at_low            = round(rsi_val, 1),
+            rsi_at_low            = round(rsi_at_sl, 1),
             market_breadth        = breadth_pct,
             regime                = regime,
             sector_slope_positive = sector_positive,
