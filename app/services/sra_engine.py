@@ -207,12 +207,13 @@ def _detect_recent_swing_lows(df: pd.DataFrame, ticker: str = "") -> list[int]:
 
 def _has_rvol_spike(rvol: pd.Series, sl_idx: int, ticker: str = "") -> tuple[bool, float]:
     """
-    يتحقق من RVOL spike في الـ RVOL_WINDOW bars بعد القاع.
+    يتحقق من RVOL spike في يوم القاع والـ RVOL_WINDOW bars بعده.
 
-    يبدأ من sl_idx+1: يوم القاع (capitulation) غالبًا بيع مكثّف مش تراكم،
-    والتراكم الحقيقي يظهر في الأيام اللي بعده.
+    نبدأ من sl_idx (يوم القاع نفسه): في أسهم EGX، يوم الـ capitulation
+    غالبًا بيكون فيه buyer exhaustion + accumulation في نفس الوقت.
+    الـ min_grade="B" guard في detect_sra_setup بيمنع الـ false positives.
     """
-    window = rvol.iloc[sl_idx + 1: sl_idx + RVOL_WINDOW + 1]
+    window = rvol.iloc[sl_idx: sl_idx + RVOL_WINDOW + 1]
     if window.empty:
         return False, 0.0
     peak = float(window.max())
@@ -448,10 +449,16 @@ def detect_sra_setup(
         if best is None or score > best.score:
             best = result
 
-    if ticker and best:
-        logger.info(
-            "SRA[%s]: SIGNAL %s score=%.0f rvol=%.1fx regime=%s",
-            ticker, best.opp_type, best.score, best.rvol_spike, regime,
-        )
+    if ticker:
+        if best:
+            logger.info(
+                "SRA[%s]: SIGNAL %s score=%.0f rvol=%.1fx regime=%s",
+                ticker, best.opp_type, best.score, best.rvol_spike, regime,
+            )
+        else:
+            logger.info(
+                "SRA[%s]: no signal — swings_found=%d breadth=%.1f%% regime=%s",
+                ticker, len(swing_idxs), breadth_pct, regime,
+            )
 
     return best
