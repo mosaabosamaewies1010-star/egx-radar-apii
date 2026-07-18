@@ -103,6 +103,8 @@ def receive_signal():
         .filter(Stock.symbol == symbol)
         .filter(Opportunity.run_date == sig_date)
         .filter(Opportunity.entry_price == entry)
+        # dual-run: never treat a TREND_ record as a duplicate of a bot signal
+        .filter(~Opportunity.opp_type.like("TREND_%"))
         .first()
     )
 

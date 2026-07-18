@@ -65,7 +65,9 @@ def discover():
     if opp_only:
         active_stock_ids_q = (
             db.session.query(Opportunity.stock_id)
-            .filter(Opportunity.outcome == "PENDING", Opportunity.is_active == True)
+            .filter(Opportunity.outcome == "PENDING", Opportunity.is_active == True,
+                    # dual-run: TREND_ signals are admin-only until validated
+                    ~Opportunity.opp_type.like("TREND_%"))
         )
         query = query.filter(Stock.id.in_(active_stock_ids_q))
 
@@ -92,6 +94,8 @@ def discover():
                 Opportunity.stock_id.in_(stock_ids),
                 Opportunity.outcome == "PENDING",
                 Opportunity.is_active == True,
+                # dual-run: TREND_ signals are admin-only until validated
+                ~Opportunity.opp_type.like("TREND_%"),
             )
             .all()
         )

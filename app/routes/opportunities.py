@@ -34,7 +34,9 @@ def list_opportunities():
 
     query = (Opportunity.query
              .join(Stock)
-             .filter(Opportunity.outcome == "PENDING", Opportunity.is_active == True)
+             .filter(Opportunity.outcome == "PENDING", Opportunity.is_active == True,
+                     # dual-run: TREND_ signals are admin-only until validated
+                     ~Opportunity.opp_type.like("TREND_%"))
              .order_by(Opportunity.radar_score.desc()))
 
     if sharia_only:
@@ -68,6 +70,9 @@ def list_opportunities():
 @opps_bp.patch("/api/opportunities/<int:opp_id>/outcome")
 def update_outcome(opp_id: int):
     opp = Opportunity.query.get_or_404(opp_id)
+    # dual-run: TREND_ outcomes are owned by outcome_job — protect research data
+    if (opp.opp_type or "").startswith("TREND_"):
+        abort(404)
     data = request.get_json(silent=True) or {}
 
     outcome    = data.get("outcome", "").upper()

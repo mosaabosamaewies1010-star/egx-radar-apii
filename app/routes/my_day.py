@@ -105,6 +105,8 @@ def my_day():
                 Opportunity.stock_id.in_(watchlist_stock_ids),
                 Opportunity.outcome == "PENDING",
                 Opportunity.is_active == True,
+                # dual-run: TREND_ signals are admin-only until validated
+                ~Opportunity.opp_type.like("TREND_%"),
             )
             .order_by(Opportunity.radar_score.desc())
             .limit(5)

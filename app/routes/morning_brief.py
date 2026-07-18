@@ -83,7 +83,9 @@ def morning_brief():
         }
 
     # New opportunities from latest opportunity date
-    latest_opp_date = db.session.query(func.max(Opportunity.run_date)).scalar()
+    # dual-run: TREND_ signals are admin-only until validated
+    latest_opp_date = (db.session.query(func.max(Opportunity.run_date))
+                       .filter(~Opportunity.opp_type.like("TREND_%")).scalar())
     new_opportunities = []
     if latest_opp_date:
         opps = (db.session.query(Opportunity, Stock)
@@ -92,6 +94,7 @@ def morning_brief():
                     Opportunity.run_date == latest_opp_date,
                     Opportunity.outcome  == "PENDING",
                     Opportunity.is_active == True,
+                    ~Opportunity.opp_type.like("TREND_%"),
                 )
                 .order_by(Opportunity.radar_score.desc())
                 .limit(5).all())
@@ -112,7 +115,8 @@ def morning_brief():
 
     opp_count = (Opportunity.query
                  .filter(Opportunity.outcome == "PENDING",
-                         Opportunity.is_active == True)
+                         Opportunity.is_active == True,
+                         ~Opportunity.opp_type.like("TREND_%"))
                  .count())
 
     regime_data = None
