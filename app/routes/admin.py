@@ -790,7 +790,14 @@ def trend_monitor():
     sra_out   = _family_outcomes("SRA_%")
 
     # ── Research validation (drift detector) ──────────────────────────────────
-    sig_per_day = round(sum(x["trend"] for x in last_30) / len(last_30), 2) if last_30 else None
+    # Measure signals/day only over days the trend engine was actually live.
+    # Days before it shipped have trend=0 by definition and would otherwise
+    # look like a permanent drift for the first 30 days after launch.
+    first_trend = (db.session.query(func.min(Opportunity.run_date))
+                   .filter(Opportunity.opp_type.like("TREND_%")).scalar())
+    active_rows = [x for x in last_30 if first_trend and x["date"] >= first_trend.isoformat()]
+    sig_per_day = (round(sum(x["trend"] for x in active_rows) / len(active_rows), 2)
+                   if active_rows else None)
     exp   = _RESEARCH_EXPECTATIONS
     drift = []
     if trend_out["closed"] >= 10:
@@ -798,7 +805,8 @@ def trend_monitor():
             drift.append("win_rate")
         if trend_out["pf"] is not None and trend_out["pf"] != 999 and abs(trend_out["pf"] - exp["pf"]) > 0.5:
             drift.append("pf")
-    if sig_per_day is not None and (sig_per_day < 0.3 or sig_per_day > 6):
+    # Needs a real run history before a signal-rate verdict is meaningful
+    if sig_per_day is not None and len(active_rows) >= 5 and (sig_per_day < 0.3 or sig_per_day > 6):
         drift.append("signals_per_day")
 
     validation = {
@@ -870,7 +878,8 @@ def trend_monitor():
         {"criterion": "Research = Production",
          "status": "pass" if validation["status"] == "match" else ("wait" if validation["status"] == "collecting" else "fail")},
         {"criterion": "لا يوجد Drift",
-         "status": "pass" if not validation["drift_fields"] else "fail"},
+         "status": "fail" if validation["drift_fields"]
+                   else ("wait" if validation["status"] == "collecting" else "pass")},
         {"criterion": "14 يوم تشغيل متواصل",
          "status": "pass" if trend_active_days >= 14 else "wait", "detail": f"{trend_active_days}/14"},
         {"criterion": "PF أعلى من SRA", "status": pf_beats},
