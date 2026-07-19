@@ -62,6 +62,7 @@ def create_app(config_name: str = "development") -> Flask:
     from app.routes.performance   import performance_bp
     from app.routes.bot           import bot_bp
     from app.routes.admin         import admin_bp
+    from app.routes.telegram_bot  import telegram_bp
 
     app.register_blueprint(health_bp)
     app.register_blueprint(stocks_bp)
@@ -79,5 +80,6 @@ def create_app(config_name: str = "development") -> Flask:
     app.register_blueprint(performance_bp)
     app.register_blueprint(bot_bp)
     app.register_blueprint(admin_bp)
+    app.register_blueprint(telegram_bp)
 
     return app

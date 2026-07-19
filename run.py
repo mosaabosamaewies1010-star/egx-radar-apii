@@ -26,6 +26,16 @@ with app.app_context():
         "ALTER TABLE users    ADD COLUMN IF NOT EXISTS referred_by_id         INTEGER",
         "ALTER TABLE users    ADD COLUMN IF NOT EXISTS referral_discount_used  BOOLEAN DEFAULT FALSE",
         "ALTER TABLE users    ADD COLUMN IF NOT EXISTS discount_credits        INTEGER DEFAULT 0",
+        "ALTER TABLE users    ADD COLUMN IF NOT EXISTS pro_expires_at          TIMESTAMP",
+        "ALTER TABLE stocks   ADD COLUMN IF NOT EXISTS eps                     FLOAT",
+        "ALTER TABLE stocks   ADD COLUMN IF NOT EXISTS week52_high             FLOAT",
+        "ALTER TABLE stocks   ADD COLUMN IF NOT EXISTS week52_low              FLOAT",
+        "ALTER TABLE stocks   ADD COLUMN IF NOT EXISTS book_value              FLOAT",
+        "ALTER TABLE stocks   ADD COLUMN IF NOT EXISTS last_change_amt         FLOAT",
+        "ALTER TABLE stocks   ADD COLUMN IF NOT EXISTS last_change_pct         FLOAT",
+        "ALTER TABLE stocks   ADD COLUMN IF NOT EXISTS day_open                FLOAT",
+        "ALTER TABLE stocks   ADD COLUMN IF NOT EXISTS day_high                FLOAT",
+        "ALTER TABLE stocks   ADD COLUMN IF NOT EXISTS day_low                 FLOAT",
     ]:
         try:
             db.session.execute(text(col_sql))

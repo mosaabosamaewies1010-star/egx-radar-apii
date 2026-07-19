@@ -100,16 +100,17 @@ def owner_dashboard():
 
     # Users
     all_users = User.query.order_by(User.created_at.desc()).all()
-    pro_count  = sum(1 for u in all_users if u.is_pro)
+    pro_count  = sum(1 for u in all_users if u.is_pro_active())
 
     users_list = [
         {
-            "id":         u.id,
-            "email":      u.email,
-            "name":       u.name,
-            "is_pro":     u.is_pro,
-            "created_at": u.created_at.isoformat() if u.created_at else None,
-            "last_login": u.last_login_at.isoformat() if u.last_login_at else None,
+            "id":             u.id,
+            "email":          u.email,
+            "name":           u.name,
+            "is_pro":         u.is_pro_active(),
+            "pro_expires_at": u.pro_expires_at.isoformat() if u.pro_expires_at else None,
+            "created_at":     u.created_at.isoformat() if u.created_at else None,
+            "last_login":     u.last_login_at.isoformat() if u.last_login_at else None,
         }
         for u in all_users
     ]
@@ -227,6 +228,84 @@ def system_health():
     })
 
 
+# ── Health detail drill-down (public — for /admin card click-to-expand) ───────
+
+@admin_bp.get("/api/admin/health-detail")
+def health_detail():
+    """
+    On-demand list behind a /admin dashboard card. ?type=<kind>&limit=<n>
+    Kept separate from /api/admin/health (which is polled every 60s) so the
+    heavier per-row queries only run when a user actually opens a card.
+    """
+    from app.models.opportunity import Opportunity
+    from app.models.score       import RadarScoreHistory
+
+    kind = request.args.get("type", "")
+    try:
+        limit = min(int(request.args.get("limit", 30)), 100)
+    except (ValueError, TypeError):
+        limit = 30
+    today = date.today()
+
+    def _opp_row(o):
+        snap  = o.feature_snapshot or {}
+        return {
+            "symbol":    o.stock.symbol  if o.stock else None,
+            "name_ar":   o.stock.name_ar if o.stock else None,
+            "opp_type":  o.opp_type,
+            "grade":     snap.get("sra_grade") or (o.opp_type or "").replace("SRA_", "").replace("_PLUS", "+"),
+            "score":     o.radar_score,
+            "outcome":   o.outcome,
+            "pnl_pct":   o.pnl_pct,
+            "entry":     o.entry_price,
+            "tp1":       o.tp1_price,
+            "sl":        o.sl_price,
+            "rr":        o.rr_ratio,
+            "run_date":  o.run_date.isoformat()   if o.run_date  else None,
+            "closed_at": o.closed_at.isoformat()  if o.closed_at else None,
+        }
+
+    if kind == "signals_today":
+        rows = (Opportunity.query.filter_by(run_date=today)
+                .order_by(Opportunity.radar_score.desc()).limit(limit).all())
+        items = [_opp_row(o) for o in rows]
+
+    elif kind == "sra_open":
+        rows = (Opportunity.query
+                .filter(Opportunity.opp_type.like("SRA_%"),
+                        Opportunity.outcome == "PENDING", Opportunity.is_active.is_(True))
+                .order_by(Opportunity.radar_score.desc()).limit(limit).all())
+        items = [_opp_row(o) for o in rows]
+
+    elif kind in ("wins", "losses"):
+        outcome = "WIN" if kind == "wins" else "LOSS"
+        rows = (Opportunity.query.filter_by(outcome=outcome)
+                .order_by(Opportunity.closed_at.desc()).limit(limit).all())
+        items = [_opp_row(o) for o in rows]
+
+    elif kind == "kb":
+        rows = (Opportunity.query
+                .filter(Opportunity.opp_type.like("SRA_%"), Opportunity.outcome.in_(["WIN", "LOSS"]))
+                .order_by(Opportunity.closed_at.desc()).limit(limit).all())
+        items = [_opp_row(o) for o in rows]
+
+    elif kind == "scored_today":
+        rows = (db.session.query(RadarScoreHistory, Stock)
+                .join(Stock, RadarScoreHistory.stock_id == Stock.id)
+                .filter(RadarScoreHistory.run_date == today)
+                .order_by(RadarScoreHistory.score.desc()).limit(limit).all())
+        items = [
+            {"symbol": s.symbol, "name_ar": s.name_ar, "score": round(r.score, 1) if r.score is not None else None,
+             "run_date": r.run_date.isoformat() if r.run_date else None}
+            for r, s in rows
+        ]
+
+    else:
+        return jsonify({"error": f"unknown type '{kind}'"}), 400
+
+    return jsonify({"type": kind, "count": len(items), "items": items})
+
+
 # ── Users list ────────────────────────────────────────────────────────────────
 
 @admin_bp.get("/api/admin/users")
@@ -240,13 +319,14 @@ def list_users():
         "count": len(users),
         "users": [
             {
-                "id":         u.id,
-                "email":      u.email,
-                "name":       u.name,
-                "is_pro":     u.is_pro,
-                "is_active":  u.is_active,
-                "created_at": u.created_at.isoformat() if u.created_at else None,
-                "last_login": u.last_login_at.isoformat() if u.last_login_at else None,
+                "id":             u.id,
+                "email":          u.email,
+                "name":           u.name,
+                "is_pro":         u.is_pro_active(),
+                "pro_expires_at": u.pro_expires_at.isoformat() if u.pro_expires_at else None,
+                "is_active":      u.is_active,
+                "created_at":     u.created_at.isoformat() if u.created_at else None,
+                "last_login":     u.last_login_at.isoformat() if u.last_login_at else None,
             }
             for u in users
         ],
@@ -270,7 +350,9 @@ def grant_pro():
     if not user:
         return jsonify({"error": f"user not found: {email}"}), 404
 
-    user.is_pro = True
+    # منح يدوي من الأدمن = دائم بلا انتهاء (مختلف عن الاشتراك المدفوع)
+    user.is_pro         = True
+    user.pro_expires_at = None
     db.session.commit()
     return jsonify({"ok": True, "email": user.email, "is_pro": True})
 
@@ -290,7 +372,8 @@ def revoke_pro():
     if not user:
         return jsonify({"error": f"user not found: {email}"}), 404
 
-    user.is_pro = False
+    user.is_pro         = False
+    user.pro_expires_at = None
     db.session.commit()
     return jsonify({"ok": True, "email": user.email, "is_pro": False})
 
@@ -359,6 +442,13 @@ def approve_payment(payment_id: int):
     payment.status = "completed"
     user = db.session.get(User, payment.user_id)
     if user:
+        from app.models.payment import PLAN_DURATION_DAYS
+        days = PLAN_DURATION_DAYS.get(payment.plan, 30)
+        now  = datetime.now(timezone.utc)
+        # لو عنده اشتراك سارٍ لسه، مدّد من تاريخ انتهائه (متجدّد قبل الانتهاء = مايضيعش أيام)
+        # غير كده، ابدأ من دلوقتي (سواء أول اشتراك أو كان منتهي)
+        base = user.pro_expires_at if (user.pro_expires_at and user.pro_expires_at > now) else now
+        user.pro_expires_at = base + timedelta(days=days)
         user.is_pro = True
         # لو المستخدم جاء بدعوة → أعطِ صاحب الدعوة credit
         if user.referred_by_id:

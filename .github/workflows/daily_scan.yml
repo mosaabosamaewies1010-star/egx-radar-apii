@@ -13,47 +13,151 @@ jobs:
 
     steps:
       - name: Trigger daily pipeline
-        id: trigger
         run: |
           RESPONSE=$(curl -s -o response.json -w "%{http_code}" \
             -X POST "${{ secrets.RENDER_API_URL }}/api/admin/trigger-scan" \
             -H "X-API-Key: ${{ secrets.BOT_API_KEY }}" \
             -H "Content-Type: application/json")
-          echo "status=$RESPONSE" >> $GITHUB_OUTPUT
           echo "HTTP status: $RESPONSE"
           cat response.json
           if [ "$RESPONSE" != "200" ]; then
-            echo "trigger_failed=true" >> $GITHUB_OUTPUT
+            echo "Trigger failed with status $RESPONSE"
+            exit 1
           fi
 
       - name: Wait for pipeline to complete
         run: sleep 300
 
-      - name: Check health and send alert
+      - name: Fetch health data
         run: |
-          HEALTH=$(curl -s "${{ secrets.RENDER_API_URL }}/api/admin/health")
-          echo "$HEALTH"
+          curl -sf "${{ secrets.RENDER_API_URL }}/api/admin/health" -o health.json
+          curl -sf "${{ secrets.RENDER_API_URL }}/api/admin/health-detail?type=signals_today&limit=5" -o detail.json
+          echo "=== health.json ==="
+          cat health.json
+          echo ""
+          echo "=== detail.json ==="
+          cat detail.json
 
-          SCORED=$(echo "$HEALTH" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['scanner']['scored_today'])" 2>/dev/null || echo "0")
-          SRA_OPEN=$(echo "$HEALTH" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['signals']['sra_open'])" 2>/dev/null || echo "0")
-          REGIME=$(echo "$HEALTH" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['regime']['regime'] if d['regime'] else 'N/A')" 2>/dev/null || echo "N/A")
-          WIN_RATE=$(echo "$HEALTH" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['performance']['win_rate'] or 'N/A')" 2>/dev/null || echo "N/A")
+      - name: Send Telegram report
+        env:
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python3 - <<'PYEOF'
+          import os, json, sys
+          from urllib import request as ureq
+          from datetime import date
 
-          DATE=$(date '+%Y-%m-%d')
+          TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
+          CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-          if [ "$SCORED" -gt "0" ]; then
-            MSG="✅ EGX Radar — $DATE%0A%0Aتم الفحص اليومي بنجاح%0A%0A📊 أسهم تم فحصها: $SCORED%0A📈 إشارات SRA مفتوحة: $SRA_OPEN%0A🌍 حالة السوق: $REGIME%0A🎯 معدل الفوز: $WIN_RATE%%"
-          else
-            MSG="❌ EGX Radar — $DATE%0A%0Aتحذير: لم يتم فحص أي أسهم اليوم%0Aيرجى مراجعة السجلات على Render"
-          fi
+          with open("health.json") as f:
+              health = json.load(f)
+          with open("detail.json") as f:
+              detail = json.load(f)
 
-          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" \
-            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}&text=$MSG&parse_mode=HTML"
+          scored    = health.get("scanner",       {}).get("scored_today", 0)
+          sra_open  = health.get("signals",       {}).get("sra_open", 0)
+          sig_today = health.get("signals",       {}).get("today", 0)
+          wins      = health.get("performance",   {}).get("wins", 0)
+          losses    = health.get("performance",   {}).get("losses", 0)
+          win_rate  = health.get("performance",   {}).get("win_rate")
+          kb_size   = health.get("knowledge_base",{}).get("size", 0)
+          regime    = (health.get("regime") or {}).get("regime", "N/A")
+          conf      = (health.get("regime") or {}).get("confidence")
+
+          today_str = date.today().strftime("%Y-%m-%d")
+          r_emoji   = {"BULL":"🟢","BEAR":"🔴","NEUTRAL":"🟡","CAUTION":"⚠️"}.get(regime, "🌍")
+          win_str   = f"{win_rate}%" if win_rate is not None else "N/A"
+          conf_str  = f" ({conf:.0f}%)" if conf else ""
+
+          if scored == 0:
+              msg = (
+                  f"❌ <b>EGX Radar — {today_str}</b>\n\n"
+                  "تحذير: لم يتم فحص أي أسهم اليوم\n"
+                  "يرجى مراجعة السجلات على Render"
+              )
+          else:
+              items = detail.get("items", [])
+              sig_lines = []
+              for s in items:
+                  sym   = s.get("symbol", "?")
+                  name  = s.get("name_ar") or ""
+                  grade = s.get("grade") or ""
+                  entry = s.get("entry")
+                  tp1   = s.get("tp1")
+                  sl    = s.get("sl")
+                  rr    = s.get("rr")
+                  parts = []
+                  if entry: parts.append(f"دخول {entry:.2f}")
+                  if tp1:   parts.append(f"TP {tp1:.2f}")
+                  if sl:    parts.append(f"SL {sl:.2f}")
+                  if rr:    parts.append(f"RR {rr:.1f}")
+                  d_str     = " | ".join(parts)
+                  grade_tag = f" [{grade}]" if grade else ""
+                  sig_lines.append(f"• <b>{sym}</b>{grade_tag} {name}\n  {d_str}")
+
+              if sig_lines:
+                  sig_block = (
+                      f"\n🎯 <b>إشارات SRA اليوم ({sig_today})</b>\n"
+                      "━━━━━━━━━━━━━\n"
+                      + "\n".join(sig_lines) + "\n"
+                  )
+              elif sig_today > 0:
+                  sig_block = f"\n🎯 إشارات SRA اليوم: <b>{sig_today}</b>\n"
+              else:
+                  sig_block = "\n📭 لا توجد إشارات SRA اليوم\n"
+
+              msg = (
+                  f"📡 <b>EGX Radar — {today_str}</b>\n\n"
+                  f"📊 فُحص <b>{scored}</b> سهم | {r_emoji} السوق: <b>{regime}</b>{conf_str}"
+                  f"{sig_block}\n"
+                  f"📈 SRA مفتوحة: <b>{sra_open}</b>\n"
+                  f"✅ رابحة: <b>{wins}</b> | ❌ خاسرة: <b>{losses}</b> | 🏆 الفوز: <b>{win_str}</b>\n"
+                  f"📚 Knowledge Base: <b>{kb_size}</b> صفقة"
+              )
+
+          payload = json.dumps({"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"}).encode()
+          req = ureq.Request(
+              f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+              data=payload,
+              headers={"Content-Type": "application/json"},
+              method="POST",
+          )
+          try:
+              resp = ureq.urlopen(req, timeout=10)
+              print("Telegram message sent, status:", resp.status)
+          except Exception as e:
+              print(f"Telegram send failed: {e}", file=sys.stderr)
+              sys.exit(1)
+          PYEOF
 
       - name: Send failure alert
         if: failure()
+        env:
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          DATE=$(date '+%Y-%m-%d')
-          MSG="🚨 EGX Radar — $DATE%0A%0Aفشل الـ pipeline اليومي%0Aيرجى مراجعة GitHub Actions للتفاصيل"
-          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" \
-            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}&text=$MSG"
+          python3 - <<'PYEOF'
+          import os, json
+          from urllib import request as ureq
+          from datetime import date
+
+          TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
+          CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+          today   = date.today().strftime("%Y-%m-%d")
+
+          msg = (
+              f"🚨 <b>EGX Radar — {today}</b>\n\n"
+              "فشل الـ pipeline اليومي\n"
+              "يرجى مراجعة GitHub Actions للتفاصيل"
+          )
+          payload = json.dumps({"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"}).encode()
+          req = ureq.Request(
+              f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+              data=payload,
+              headers={"Content-Type": "application/json"},
+              method="POST",
+          )
+          ureq.urlopen(req, timeout=10)
+          PYEOF

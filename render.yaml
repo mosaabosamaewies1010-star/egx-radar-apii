@@ -9,9 +9,7 @@ services:
     autoDeploy: true
     envVars:
       - key: DATABASE_URL
-        fromDatabase:
-          name: egx-radar-db
-          property: externalConnectionString
+        sync: false
       - key: SECRET_KEY
         generateValue: true
       - key: JWT_SECRET_KEY
@@ -25,9 +23,10 @@ services:
         value: https://egx-radar.vercel.app
       - key: BOT_API_KEY
         generateValue: true
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
       - key: PYTHON_VERSION
         value: "3.12.0"
 
-databases:
-  - name: egx-radar-db
-    plan: free
