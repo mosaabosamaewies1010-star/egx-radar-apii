@@ -286,21 +286,74 @@ def health_detail():
 
     def _opp_row(o):
         snap  = o.feature_snapshot or {}
+        st    = o.stock
+
+        # ── Pivot Points from latest session OHLC ─────────────────────────
+        pivot = r1 = r2 = s1 = s2 = None
+        if st and st.day_high and st.day_low and st.last_price:
+            h, l, c = st.day_high, st.day_low, st.last_price
+            p    = (h + l + c) / 3
+            pivot = round(p, 2)
+            r1    = round(2 * p - l, 2)
+            r2    = round(p + (h - l), 2)
+            s1    = round(2 * p - h, 2)
+            s2    = round(p - (h - l), 2)
+
+        # ── Money Flow Direction ───────────────────────────────────────────
+        mf_dir = mf_ratio = None
+        if st and st.day_high and st.day_low and st.last_price:
+            h, l, c = st.day_high, st.day_low, st.last_price
+            if h != l:
+                ratio  = (2 * c - h - l) / (h - l)
+                mf_ratio = round(ratio, 2)
+                mf_dir   = "IN" if ratio > 0 else "OUT"
+            else:
+                mf_dir, mf_ratio = "NEUTRAL", 0.0
+
+        # ── P/B Ratio ─────────────────────────────────────────────────────
+        pb_ratio = None
+        if st and st.last_price and getattr(st, "book_value", None):
+            try:
+                pb_ratio = round(st.last_price / st.book_value, 2)
+            except (ZeroDivisionError, TypeError):
+                pass
+
+        # ── Why signals & KB context (from feature_snapshot) ──────────────
+        why_signals   = snap.get("signals") or snap.get("reasons") or []
+        regime        = snap.get("regime")
+        breadth_pct   = snap.get("market_breadth_pct")
+        similar_cases = snap.get("similar_cases", 0)
+        win_rate_pct  = snap.get("historical_win_rate", 0.0)
+
         return {
-            "symbol":    o.stock.symbol     if o.stock else None,
-            "name_ar":   o.stock.name_ar    if o.stock else None,
-            "is_sharia": o.stock.is_sharia  if o.stock else False,
-            "opp_type":  o.opp_type,
-            "grade":     snap.get("sra_grade") or (o.opp_type or "").replace("SRA_", "").replace("_PLUS", "+"),
-            "score":     o.radar_score,
-            "outcome":   o.outcome,
-            "pnl_pct":   o.pnl_pct,
-            "entry":     o.entry_price,
-            "tp1":       o.tp1_price,
-            "sl":        o.sl_price,
-            "rr":        o.rr_ratio,
-            "run_date":  o.run_date.isoformat()   if o.run_date  else None,
-            "closed_at": o.closed_at.isoformat()  if o.closed_at else None,
+            "symbol":         st.symbol    if st else None,
+            "name_ar":        st.name_ar   if st else None,
+            "is_sharia":      st.is_sharia if st else False,
+            "opp_type":       o.opp_type,
+            "grade":          snap.get("sra_grade") or (o.opp_type or "").replace("SRA_", "").replace("_PLUS", "+"),
+            "score":          o.radar_score,
+            "outcome":        o.outcome,
+            "pnl_pct":        o.pnl_pct,
+            "entry":          o.entry_price,
+            "tp1":            o.tp1_price,
+            "sl":             o.sl_price,
+            "rr":             o.rr_ratio,
+            "run_date":       o.run_date.isoformat()  if o.run_date  else None,
+            "closed_at":      o.closed_at.isoformat() if o.closed_at else None,
+            # new
+            "pivot":          pivot,
+            "r1":             r1,
+            "r2":             r2,
+            "s1":             s1,
+            "s2":             s2,
+            "money_flow_dir": mf_dir,
+            "money_flow_ratio": mf_ratio,
+            "pb_ratio":       pb_ratio,
+            "why_signals":    why_signals,
+            "regime":         regime,
+            "breadth_pct":    breadth_pct,
+            "similar_cases":  similar_cases,
+            "win_rate_pct":   win_rate_pct,
         }
 
     if kind == "signals_today":
