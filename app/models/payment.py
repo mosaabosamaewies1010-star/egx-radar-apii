@@ -2,6 +2,14 @@ from datetime import datetime, timezone
 from app import db
 
 PLANS = {
+    "pro_weekly": {
+        "id":       "pro_weekly",
+        "name_ar":  "PRO أسبوعي",
+        "price":    99.0,
+        "currency": "EGP",
+        "period":   "weekly",
+        "savings":  None,
+    },
     "pro_monthly": {
         "id":       "pro_monthly",
         "name_ar":  "PRO شهري",
@@ -18,6 +26,12 @@ PLANS = {
         "period":   "annual",
         "savings":  "25%",
     },
+}
+
+PLAN_DURATION_DAYS = {
+    "pro_weekly":  7,
+    "pro_monthly": 30,
+    "pro_annual":  365,
 }
 
 PLAN_FEATURES = [

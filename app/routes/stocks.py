@@ -130,6 +130,31 @@ def _build_response(stock, score_rec, opp_result=None, db_opp=None):
         "name_en":   stock.name_en,
         "sector":    stock.sector,
         "is_sharia": stock.is_sharia,
+        # Price snapshot — populated daily by daily_scan; None until first run after deploy
+        "price":      stock.last_price,
+        "change_amt": stock.last_change_amt,
+        "change_pct": stock.last_change_pct,
+        "day_stats": {
+            "open":       stock.day_open,
+            "high":       stock.day_high,
+            "low":        stock.day_low,
+            "close":      stock.last_price,
+            "volume":     stock.last_volume,
+            "value":      round(stock.last_price * stock.last_volume, 2)
+                           if (stock.last_price and stock.last_volume) else None,
+            "updated_at": stock.price_updated_at.isoformat() if stock.price_updated_at else None,
+        },
+        "fundamentals": {
+            "market_cap":     stock.market_cap,
+            "pe_ratio":       stock.pe_ratio,
+            "eps":            stock.eps,
+            "dividend_yield": stock.dividend_yield,
+            "week52_high":    stock.week52_high,
+            "week52_low":     stock.week52_low,
+            "book_value":     stock.book_value,
+            "updated_at":     stock.fundamentals_updated_at.isoformat() if stock.fundamentals_updated_at else None,
+        },
+        "sector_peers": _sector_peers(stock),
         **score_rec.to_dict(),
     }
 
@@ -176,6 +201,27 @@ def _build_response(stock, score_rec, opp_result=None, db_opp=None):
     base["is_pro"] = is_pro
 
     return base
+
+
+def _sector_peers(stock, limit: int = 8) -> list[dict]:
+    """Up to `limit` other active stocks in the same sector, by market cap desc."""
+    if not stock.sector:
+        return []
+    peers = (
+        Stock.query
+        .filter(Stock.sector == stock.sector, Stock.id != stock.id, Stock.is_active.is_(True))
+        .order_by(Stock.market_cap.desc().nullslast())
+        .limit(limit)
+        .all()
+    )
+    return [
+        {
+            "symbol":      p.symbol,
+            "name_ar":     p.name_ar,
+            "change_pct":  p.last_change_pct,
+        }
+        for p in peers
+    ]
 
 
 def _opp_dict_sra(o: Opportunity, is_pro: bool = False) -> dict:

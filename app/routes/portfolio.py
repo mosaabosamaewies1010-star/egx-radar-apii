@@ -9,7 +9,9 @@ from flask_jwt_extended import get_jwt_identity, verify_jwt_in_request
 from app import db
 from app.models.stock import Stock
 from app.models.portfolio import PortfolioHolding
+from app.models.score import RadarScoreHistory
 from app.utils.pro_guard import require_pro
+from app.services.portfolio_health import compute_portfolio_health
 
 portfolio_bp = Blueprint("portfolio", __name__)
 
@@ -77,6 +79,70 @@ def list_holdings():
             "total_unrealized_pnl": total_unrealized,
         },
         "holdings": [_enrich(h) for h in holdings],
+    })
+
+
+@portfolio_bp.get("/api/portfolio/health")
+def portfolio_health():
+    """
+    Portfolio Health — التنويع + المخاطرة + الجودة الفنية + الأداء.
+    منطق موافَق عليه (انظر app/services/portfolio_health.py للتفاصيل والمنهجية).
+    """
+    err = require_pro()
+    if err:
+        return err
+
+    user_id = _get_user_id()
+    open_holdings = (
+        PortfolioHolding.query
+        .filter_by(user_id=user_id, closed_at=None)
+        .all()
+    )
+    closed_holdings = (
+        PortfolioHolding.query
+        .filter(PortfolioHolding.user_id == user_id, PortfolioHolding.closed_at.isnot(None))
+        .all()
+    )
+
+    total_invested = sum(h.cost_basis for h in open_holdings)
+    total_unrealized = None
+    unreal_vals = []
+    for h in open_holdings:
+        if h.stock and h.stock.last_price:
+            unreal_vals.append((h.stock.last_price - h.avg_cost) * h.quantity)
+    if unreal_vals:
+        total_unrealized = sum(unreal_vals)
+    total_realized = sum(h.realized_pnl for h in closed_holdings if h.realized_pnl is not None)
+
+    # أحدث radar_score/atr_pct لكل سهم في المحفظة المفتوحة (استعلام واحد لكل الأسهم)
+    stock_ids = [h.stock_id for h in open_holdings]
+    latest_scores: dict[int, dict] = {}
+    if stock_ids:
+        rows = (
+            RadarScoreHistory.query
+            .filter(RadarScoreHistory.stock_id.in_(stock_ids))
+            .order_by(RadarScoreHistory.stock_id, RadarScoreHistory.run_date.desc())
+            .all()
+        )
+        for r in rows:
+            if r.stock_id not in latest_scores:   # أول ظهور = الأحدث (مرتّب تنازليًا)
+                latest_scores[r.stock_id] = {"score": r.score, "atr_pct": r.atr_pct}
+
+    result = compute_portfolio_health(
+        open_holdings=open_holdings,
+        total_invested=total_invested,
+        total_unrealized_pnl=total_unrealized,
+        total_realized_pnl=total_realized,
+        latest_scores=latest_scores,
+    )
+
+    return jsonify({
+        "health_score":    result.health_score,
+        "components":      result.components,
+        "warnings":        result.warnings,
+        "recommendations": result.recommendations,
+        "positions":       result.positions,
+        "message":         result.message,
     })
 
 

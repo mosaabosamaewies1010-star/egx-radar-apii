@@ -2,8 +2,10 @@ name: EGX Keep-Alive Ping
 
 on:
   schedule:
-    # كل 10 دقايق من 8 صباحاً لـ 4 عصراً UTC (10ص - 6م بتوقيت القاهرة) الأحد للخميس
-    - cron: '0,10,20,30,40,50 8-16 * * 0,1,2,3,4'
+    # كل 10 دقايق من 6 صباحاً لـ 11 مساءً UTC (8ص - 1ص بتوقيت القاهرة) كل يوم بما فيها الويكند
+    # (كانت مقتصرة على الأحد-الخميس 8-16 UTC فقط، فأي زيارة يوم جمعة/سبت أو مساءً كانت
+    #  بتقابل السيرفر نايم على Render وتاخد لحد 90 ثانية cold start)
+    - cron: '0,10,20,30,40,50 6-23 * * *'
   workflow_dispatch:
 
 jobs:
@@ -26,6 +28,14 @@ jobs:
 
       - name: Fallback scan trigger (if daily_scan cron missed today)
         run: |
+          # الآن الـ ping بيشتغل 7 أيام، لكن سوق البورصة المصرية بيقفل الجمعة والسبت
+          # (date -u +%u: 5=Fri, 6=Sat) — منع تشغيل سكان على يوم مفيش فيه تداول أصلاً
+          DOW=$(date -u +%u)
+          if [ "$DOW" = "5" ] || [ "$DOW" = "6" ]; then
+            echo "Weekend (EGX closed) — skipping scan fallback check."
+            exit 0
+          fi
+
           # فحص بس بعد 13:30 UTC (= 15:30 Cairo) — بعد إغلاق السوق بساعة
           HOUR=$(date -u +%H)
           MIN=$(date -u +%M)

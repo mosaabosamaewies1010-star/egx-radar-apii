@@ -36,7 +36,7 @@ def subscribe():
     if not user:
         return jsonify({"error": "المستخدم غير موجود"}), 404
 
-    if user.is_pro:
+    if user.is_pro_active():
         return jsonify({"error": "أنت مشترك بالفعل في الخطة المدفوعة"}), 409
 
     data           = request.get_json(silent=True) or {}

@@ -18,6 +18,9 @@ class User(db.Model):
 
     is_active        = db.Column(db.Boolean, default=True,  nullable=False)
     is_pro           = db.Column(db.Boolean, default=False, nullable=False)
+    # NULL = no active paid subscription, or a permanent manual grant (admin grant-pro).
+    # Set on payment approval to approval_time + plan duration; enforced live by is_pro_active().
+    pro_expires_at   = db.Column(db.DateTime, nullable=True)
 
     referral_code          = db.Column(db.String(20), unique=True, nullable=True, index=True)
     referred_by_id         = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
@@ -44,12 +47,25 @@ class User(db.Model):
         """هل لديه خصم دعوة لم يستخدمه بعد؟"""
         return bool(self.referred_by_id and not self.referral_discount_used)
 
+    def is_pro_active(self) -> bool:
+        """
+        True فقط إذا كان PRO فعلاً سارياً الآن.
+        pro_expires_at = NULL يعني منح يدوي دائم (admin grant-pro) — لا ينتهي.
+        هذا هو المصدر الوحيد للحقيقة المستخدم في كل مكان (pro_guard، الدفع، الواجهة).
+        """
+        if not self.is_pro:
+            return False
+        if self.pro_expires_at is None:
+            return True
+        return self.pro_expires_at > datetime.now(timezone.utc)
+
     def to_dict(self) -> dict:
         return {
             "id":                    self.id,
             "email":                 self.email,
             "name":                  self.name,
-            "is_pro":                self.is_pro,
+            "is_pro":                self.is_pro_active(),
+            "pro_expires_at":        self.pro_expires_at.isoformat() if self.pro_expires_at else None,
             "referral_code":         self.referral_code,
             "discount_credits":      self.discount_credits,
             "referred_by_id":        self.referred_by_id,

@@ -31,9 +31,9 @@ def _get_user():
 
 
 def current_is_pro() -> bool:
-    """True if the request carries a valid PRO JWT."""
+    """True if the request carries a valid, still-active PRO subscription."""
     user = _get_user()
-    return bool(user and user.is_pro)
+    return bool(user and user.is_pro_active())
 
 
 def require_pro():

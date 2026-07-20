@@ -19,6 +19,7 @@ def create_scheduler(app) -> BackgroundScheduler:
     from app.jobs.regime_job  import run_regime_job
     from app.jobs.daily_scan  import run_daily_scan
     from app.jobs.outcome_job import run_outcome_job
+    from app.jobs.expire_pro  import run_expire_pro_job
 
     # 15:00 Cairo — compute market regime (30 min after close)
     scheduler.add_job(
@@ -47,5 +48,18 @@ def create_scheduler(app) -> BackgroundScheduler:
         misfire_grace_time=3600,
     )
 
-    logger.info("Scheduler configured: regime_job@15:00, daily_scan@15:30, outcome_job@16:00 (Cairo)")
+    # 00:05 Cairo, every day — downgrade users whose PRO subscription expired
+    # (subscriptions can lapse on any day, not just trading days)
+    scheduler.add_job(
+        func=lambda: run_expire_pro_job(app),
+        trigger=CronTrigger(hour=0, minute=5, timezone=CAIRO_TZ),
+        id="expire_pro_job",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
+    logger.info(
+        "Scheduler configured: regime_job@15:00, daily_scan@15:30, "
+        "outcome_job@16:00, expire_pro_job@00:05 (Cairo)"
+    )
     return scheduler

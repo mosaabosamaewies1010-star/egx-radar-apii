@@ -61,6 +61,32 @@ def fetch_multiple(symbols: list[str], period: str = "3mo") -> dict[str, Optiona
     return result
 
 
+def fetch_fundamentals(symbol: str) -> dict:
+    """
+    Best-effort fundamentals snapshot from yfinance's Ticker.info.
+    Coverage for EGX stocks is inconsistent — many fields (dividend for
+    non-payers, EPS for some small caps) legitimately come back None.
+    Caller must treat every value as optional; never fabricate a fallback.
+    """
+    ticker = egx_ticker(symbol)
+    try:
+        info = yf.Ticker(ticker).info or {}
+    except Exception as exc:
+        logger.warning("yfinance fundamentals error for %s: %s", ticker, exc)
+        return {}
+
+    div_yield = info.get("trailingAnnualDividendYield")
+    return {
+        "market_cap":     info.get("marketCap"),
+        "pe_ratio":       info.get("trailingPE"),
+        "eps":            info.get("epsTrailingTwelveMonths"),
+        "dividend_yield": round(div_yield * 100, 2) if div_yield is not None else None,
+        "week52_high":    info.get("fiftyTwoWeekHigh"),
+        "week52_low":     info.get("fiftyTwoWeekLow"),
+        "book_value":     info.get("bookValue"),
+    }
+
+
 def compute_adt(df: pd.DataFrame, window: int = 20) -> float:
     """Average Daily Turnover in EGP over last `window` days."""
     if df is None or df.empty:
