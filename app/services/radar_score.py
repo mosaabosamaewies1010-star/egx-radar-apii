@@ -15,7 +15,7 @@ W_VOLUME      = 14
 W_SECTOR      = 12
 W_FUNDAMENTAL = 15
 
-MAX_RISK_PENALTY = 15
+MAX_RISK_PENALTY = 22
 
 REGIME_MULTIPLIERS = {
     "BULL":          1.00,
@@ -209,5 +209,18 @@ def _risk_penalty(ind: Indicators) -> float:
     # RSI extremes
     if ind.rsi > 80 or ind.rsi < 25:
         penalty += 3
+
+    # Money Flow: closing near bottom of range = smart money leaving
+    if ind.mf_ratio < -0.3:
+        penalty += 5   # strongly OUT
+    elif ind.mf_ratio < -0.1:
+        penalty += 2   # mildly OUT
+
+    # Pivot position: penalise buying at or above R1 (resistance)
+    if ind.day_high > ind.day_low:
+        p  = (ind.day_high + ind.day_low + ind.price) / 3
+        r1 = 2 * p - ind.day_low
+        if ind.price >= r1:
+            penalty += 5   # entry at/above first resistance
 
     return min(penalty, MAX_RISK_PENALTY)

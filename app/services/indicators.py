@@ -43,6 +43,11 @@ class Indicators:
     # Data
     data_quality: str  # HIGH | MEDIUM | LOW | NO_DATA
 
+    # Intraday context (optional — default neutral so old call sites don't break)
+    mf_ratio:  float = 0.0  # (2*close - high - low) / (high - low), range -1..1
+    day_high:  float = 0.0  # last candle's high
+    day_low:   float = 0.0  # last candle's low
+
 
 def compute_indicators(df: pd.DataFrame, data_quality: str = "HIGH") -> Optional[Indicators]:
     """
@@ -105,7 +110,12 @@ def compute_indicators(df: pd.DataFrame, data_quality: str = "HIGH") -> Optional
     # ── ADX ───────────────────────────────────────────────────────────
     adx, plus_di, minus_di = _adx(high, low, close, 14)
 
-    # ── RVOL ──────────────────────────────────────────────────────────
+    # Intraday Money Flow: (2C - H - L) / (H - L), range -1..1
+    day_h    = float(high.iloc[-1])
+    day_l    = float(low.iloc[-1])
+    denom    = day_h - day_l
+    mf_ratio = (2 * price - day_h - day_l) / (denom + 1e-9) if denom > 1e-6 else 0.0
+
     avg_vol_20 = float(volume.rolling(20).mean().iloc[-1])
     cur_vol    = float(volume.iloc[-1])
     rvol = (cur_vol / avg_vol_20) if avg_vol_20 > 0 else 1.0
@@ -137,6 +147,9 @@ def compute_indicators(df: pd.DataFrame, data_quality: str = "HIGH") -> Optional
         bb_upper=round(bb_upper, 4),
         bb_lower=round(bb_lower, 4),
         bb_pct=round(float(bb_pct), 3),
+        mf_ratio=round(float(mf_ratio), 3),
+        day_high=round(day_h, 4),
+        day_low=round(day_l, 4),
         data_quality=data_quality,
     )
 
