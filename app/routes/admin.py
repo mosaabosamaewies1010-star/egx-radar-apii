@@ -287,8 +287,9 @@ def health_detail():
     def _opp_row(o):
         snap  = o.feature_snapshot or {}
         return {
-            "symbol":    o.stock.symbol  if o.stock else None,
-            "name_ar":   o.stock.name_ar if o.stock else None,
+            "symbol":    o.stock.symbol     if o.stock else None,
+            "name_ar":   o.stock.name_ar    if o.stock else None,
+            "is_sharia": o.stock.is_sharia  if o.stock else False,
             "opp_type":  o.opp_type,
             "grade":     snap.get("sra_grade") or (o.opp_type or "").replace("SRA_", "").replace("_PLUS", "+"),
             "score":     o.radar_score,
