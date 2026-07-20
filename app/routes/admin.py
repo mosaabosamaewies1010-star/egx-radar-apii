@@ -133,6 +133,7 @@ def system_health():
     from app.models.opportunity import Opportunity
     from app.models.score       import RadarScoreHistory
     from app.models.regime      import MarketRegimeHistory
+    from app.models.scan_log    import ScanLog
 
     today     = date.today()
     week_ago  = today - timedelta(days=7)
@@ -225,6 +226,16 @@ def system_health():
             "scan_days_7d": scored_week,
         },
         "regime": regime_info,
+        "last_scan": (lambda s: {
+            "run_date":       s.run_date.isoformat() if s.run_date else None,
+            "status":         s.status,
+            "stocks_scanned": s.stocks_scanned,
+            "sra_signals":    s.sra_signals,
+            "duration_s":     s.duration_seconds,
+            "error":          s.error_message,
+        } if s else None)(
+            ScanLog.query.order_by(ScanLog.id.desc()).first()
+        ),
     })
 
 
