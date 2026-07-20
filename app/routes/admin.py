@@ -151,6 +151,24 @@ def system_health():
         ).all()
     )
 
+    sra_7d  = Opportunity.query.filter(
+        Opportunity.opp_type.like("SRA_%"),
+        Opportunity.run_date >= week_ago,
+    ).count()
+    sra_30d = Opportunity.query.filter(
+        Opportunity.opp_type.like("SRA_%"),
+        Opportunity.run_date >= month_ago,
+    ).count()
+    trend_7d = Opportunity.query.filter(
+        Opportunity.opp_type.like("TREND_%"),
+        Opportunity.run_date >= week_ago,
+    ).count()
+    trend_open = Opportunity.query.filter(
+        Opportunity.opp_type.like("TREND_%"),
+        Opportunity.outcome == "PENDING",
+        Opportunity.is_active == True,
+    ).count()
+
     grade_dist = {"A+": 0, "A": 0, "B": 0}
     sra_scores = []
     for o in sra_open:
@@ -216,9 +234,13 @@ def system_health():
             "free":  total_users - pro_users,
         },
         "signals": {
-            "today":    signals_today,
-            "sra_open": len(sra_open),
-            "all_open": open_trades,
+            "today":      signals_today,
+            "sra_open":   len(sra_open),
+            "all_open":   open_trades,
+            "sra_7d":     sra_7d,
+            "sra_30d":    sra_30d,
+            "trend_7d":   trend_7d,
+            "trend_open": trend_open,
         },
         "performance": {
             "total_closed": total_closed,
