@@ -203,6 +203,7 @@ def system_health():
             "stocks_scanned": s.stocks_scanned       if s else None,
             "sra_signals":    s.sra_signals          if s else None,
             "duration_s":     s.duration_seconds     if s else None,
+            "error":          s.error_message        if s else None,
         } if s else None
     except Exception:
         last_scan_info = None

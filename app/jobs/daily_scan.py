@@ -491,12 +491,14 @@ def run_daily_scan(app) -> None:
                 scan_log.finished_at      = datetime.now(timezone.utc)
                 db.session.commit()
 
-        except Exception:
+        except Exception as _top_exc:
+            import traceback
+            _tb = traceback.format_exc()
             logger.exception("daily_scan: top-level error")
             if scan_log is not None:
                 try:
                     scan_log.status        = "failed"
-                    scan_log.error_message = "top-level exception — see server logs"
+                    scan_log.error_message = str(_top_exc)[:1000] + "\n---\n" + _tb[-1500:]
                     scan_log.finished_at   = datetime.now(timezone.utc)
                     db.session.commit()
                 except Exception:
