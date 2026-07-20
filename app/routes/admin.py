@@ -315,6 +315,14 @@ def health_detail():
             for r, s in rows
         ]
 
+    elif kind == "signals_week":
+        week_ago = today - timedelta(days=7)
+        rows = (Opportunity.query
+                .filter(Opportunity.run_date >= week_ago)
+                .order_by(Opportunity.run_date.desc(), Opportunity.radar_score.desc())
+                .limit(limit).all())
+        items = [_opp_row(o) for o in rows]
+
     else:
         return jsonify({"error": f"unknown type '{kind}'"}), 400
 
