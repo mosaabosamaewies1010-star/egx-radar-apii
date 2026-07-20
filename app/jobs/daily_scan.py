@@ -15,7 +15,7 @@ All run every day, writing separate Opportunity records by opp_type prefix:
   Trend:    "TREND_A+" | "TREND_A"  | "TREND_B"
 """
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -31,16 +31,33 @@ def run_daily_scan(app) -> None:
             from app.models.regime import MarketRegimeHistory
             from app.models.scan_log import ScanLog
 
+            # Ensure all tables exist (guards against first-run on a fresh DB)
+            try:
+                db.create_all()
+            except Exception as _ce:
+                logger.warning("daily_scan: db.create_all() warning: %s", _ce)
+
             today = date.today()
-            scan_log = ScanLog(run_date=today, status="running")
-            db.session.add(scan_log)
-            db.session.commit()
+            try:
+                scan_log = ScanLog(run_date=today, status="running")
+                db.session.add(scan_log)
+                db.session.commit()
+            except Exception as _sle:
+                db.session.rollback()
+                logger.warning("daily_scan: could not create ScanLog: %s", _sle)
+                scan_log = None
+            # Cap on live yf.Ticker(...).info calls per run — first run after
+            # adding the fundamentals columns has EVERY stock "stale" at once;
+            # without a cap that's ~200 extra network calls in one scan, which
+            # is what spiked memory past Render's free-tier limit on 2026-07-19.
+            MAX_FUNDAMENTALS_PER_RUN = 40
+            fundamentals_fetched_this_run = 0
             from app.services.indicators import compute_indicators
             from app.services.radar_score import compute_radar_score
             from app.services.opportunity import compute_opportunity
             from app.services.explain import generate_explain
             from app.utils.data_fetcher import (
-                fetch_ohlcv, fetch_multiple, compute_adt, assess_data_quality,
+                fetch_ohlcv, fetch_multiple, fetch_fundamentals, compute_adt, assess_data_quality,
             )
 
             # SRA Engine — imported with guard so old scan still runs if unavailable
@@ -177,6 +194,52 @@ def run_daily_scan(app) -> None:
                         logger.warning("daily_scan: no data for %s", stock.symbol)
                         fail += 1
                         continue
+
+                    # ── PRICE SNAPSHOT — every day, free (df already in hand) ─
+                    # Populates Stock.last_price/day_open/high/low/etc, which
+                    # nothing wrote before (portfolio P&L + the stock page both
+                    # depend on this).
+                    try:
+                        last = df.iloc[-1]
+                        stock.day_open    = float(last["open"])
+                        stock.day_high    = float(last["high"])
+                        stock.day_low     = float(last["low"])
+                        stock.last_price  = float(last["close"])
+                        stock.last_volume = int(last["volume"])
+                        stock.last_adt    = compute_adt(df)
+                        if len(df) >= 2:
+                            prev_close = float(df["close"].iloc[-2])
+                            if prev_close > 0:
+                                stock.last_change_amt = round(stock.last_price - prev_close, 4)
+                                stock.last_change_pct = round(stock.last_change_amt / prev_close * 100, 2)
+                        stock.price_updated_at = datetime.now(timezone.utc)
+                    except Exception:
+                        logger.warning("daily_scan: price snapshot failed for %s", stock.symbol, exc_info=True)
+
+                    # ── FUNDAMENTALS — weekly only (separate yfinance .info call,
+                    # heavier than price history; refreshing 200+ stocks daily
+                    # isn't needed since P/E, market cap etc. barely move day to day) ─
+                    stale = (
+                        stock.fundamentals_updated_at is None
+                        or stock.fundamentals_updated_at < datetime.now(timezone.utc) - timedelta(days=6)
+                    )
+                    if stale and fundamentals_fetched_this_run >= MAX_FUNDAMENTALS_PER_RUN:
+                        stale = False   # hit the cap — leave it stale, pick it up next run
+                    if stale:
+                        fundamentals_fetched_this_run += 1
+                        try:
+                            fnd = fetch_fundamentals(stock.symbol)
+                            if fnd:
+                                stock.market_cap      = fnd.get("market_cap")
+                                stock.pe_ratio         = fnd.get("pe_ratio")
+                                stock.eps              = fnd.get("eps")
+                                stock.dividend_yield   = fnd.get("dividend_yield")
+                                stock.week52_high      = fnd.get("week52_high")
+                                stock.week52_low       = fnd.get("week52_low")
+                                stock.book_value       = fnd.get("book_value")
+                                stock.fundamentals_updated_at = datetime.now(timezone.utc)
+                        except Exception:
+                            logger.warning("daily_scan: fundamentals fetch failed for %s", stock.symbol, exc_info=True)
 
                     # ── MOMENTUM PASS (old system — unchanged) ────────────────
                     already_scored = RadarScoreHistory.query.filter_by(
@@ -417,15 +480,16 @@ def run_daily_scan(app) -> None:
                         success + skip + fail, success, skip, fail)
             logger.info("daily_scan: ============================")
 
-            scan_log.stocks_scanned   = success + skip + fail
-            scan_log.sra_signals      = sra_count
-            scan_log.momentum_signals = momentum_count
-            scan_log.kb_size          = kb_size
-            scan_log.regime           = sra_regime if _SRA_AVAILABLE else momentum_regime
-            scan_log.breadth_pct      = breadth_pct if _SRA_AVAILABLE else None
-            scan_log.status           = "success" if fail == 0 else "partial"
-            scan_log.finished_at      = datetime.now(timezone.utc)
-            db.session.commit()
+            if scan_log is not None:
+                scan_log.stocks_scanned   = success + skip + fail
+                scan_log.sra_signals      = sra_count
+                scan_log.momentum_signals = momentum_count
+                scan_log.kb_size          = kb_size
+                scan_log.regime           = sra_regime if _SRA_AVAILABLE else momentum_regime
+                scan_log.breadth_pct      = breadth_pct if _SRA_AVAILABLE else None
+                scan_log.status           = "success" if fail == 0 else "partial"
+                scan_log.finished_at      = datetime.now(timezone.utc)
+                db.session.commit()
 
         except Exception:
             logger.exception("daily_scan: top-level error")
