@@ -82,4 +82,7 @@ def create_app(config_name: str = "development") -> Flask:
     app.register_blueprint(admin_bp)
     app.register_blueprint(telegram_bp)
 
+    with app.app_context():
+        db.create_all()
+
     return app
