@@ -407,6 +407,19 @@ def health_detail():
                 .order_by(Opportunity.radar_score.desc()).limit(limit).all())
         items = [_opp_row(o) for o in rows]
 
+    elif kind == "trend_open":
+        rows = (Opportunity.query
+                .filter(Opportunity.opp_type.like("TREND_%"),
+                        Opportunity.outcome == "PENDING", Opportunity.is_active.is_(True))
+                .order_by(Opportunity.radar_score.desc()).limit(limit).all())
+        items = [_opp_row(o) for o in rows]
+
+    elif kind == "all_open":
+        rows = (Opportunity.query
+                .filter(Opportunity.outcome == "PENDING", Opportunity.is_active.is_(True))
+                .order_by(Opportunity.radar_score.desc()).limit(limit).all())
+        items = [_opp_row(o) for o in rows]
+
     elif kind in ("wins", "losses"):
         outcome = "WIN" if kind == "wins" else "LOSS"
         rows = (Opportunity.query.filter_by(outcome=outcome)
