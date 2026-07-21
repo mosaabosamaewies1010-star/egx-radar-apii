@@ -284,6 +284,38 @@ def health_detail():
         limit = 30
     today = date.today()
 
+    def _classify_mf_reason(mf_ratio, snap, entry_price, current_price):
+        """
+        Classify WHY money is flowing out.
+        Returns (reason_key, reason_ar).
+
+        PROFIT_TAKING  — price rose past entry, people locking in gains (temporary)
+        PANIC          — large volume spike or bear regime, fear-driven selling (opportunity)
+        DISTRIBUTION   — gradual institutional exit, stock still near/below entry (caution)
+        """
+        rsi        = snap.get("rsi") or snap.get("rsi_at_low")
+        rvol_spike = snap.get("rvol_spike")
+        regime     = (snap.get("regime") or "").upper()
+
+        # Price rose significantly after signal → people locking profits
+        if entry_price and current_price and current_price > entry_price * 1.06:
+            return "PROFIT_TAKING", "جني أرباح"
+
+        # RSI was overbought at signal time → momentum extended, profit taking
+        if rsi and rsi > 68:
+            return "PROFIT_TAKING", "جني أرباح"
+
+        # High volume spike → panic / fear-driven selling (often a bottom signal)
+        if rvol_spike and rvol_spike > 3.0:
+            return "PANIC", "ذعر بيع"
+
+        # Very strong outflow in a fearful market → panic
+        if mf_ratio is not None and mf_ratio < -0.5 and regime in ("BEAR", "VOLATILE"):
+            return "PANIC", "ذعر بيع"
+
+        # Default: gradual institutional distribution
+        return "DISTRIBUTION", "توزيع محتمل"
+
     def _opp_row(o):
         snap  = o.feature_snapshot or {}
         st    = o.stock
@@ -300,15 +332,20 @@ def health_detail():
             s2    = round(p - (h - l), 2)
 
         # ── Money Flow Direction ───────────────────────────────────────────
-        mf_dir = mf_ratio = None
+        mf_dir = mf_ratio = mf_reason = mf_reason_ar = None
         if st and st.day_high and st.day_low and st.last_price:
             h, l, c = st.day_high, st.day_low, st.last_price
             if h != l:
-                ratio  = (2 * c - h - l) / (h - l)
+                ratio    = (2 * c - h - l) / (h - l)
                 mf_ratio = round(ratio, 2)
                 mf_dir   = "IN" if ratio > 0 else "OUT"
             else:
                 mf_dir, mf_ratio = "NEUTRAL", 0.0
+
+            if mf_dir == "OUT":
+                mf_reason, mf_reason_ar = _classify_mf_reason(
+                    mf_ratio, snap, o.entry_price, st.last_price
+                )
 
         # ── P/B Ratio ─────────────────────────────────────────────────────
         pb_ratio = None
@@ -346,8 +383,10 @@ def health_detail():
             "r2":             r2,
             "s1":             s1,
             "s2":             s2,
-            "money_flow_dir": mf_dir,
+            "money_flow_dir":   mf_dir,
             "money_flow_ratio": mf_ratio,
+            "mf_reason":        mf_reason,
+            "mf_reason_ar":     mf_reason_ar,
             "pb_ratio":       pb_ratio,
             "why_signals":    why_signals,
             "regime":         regime,
