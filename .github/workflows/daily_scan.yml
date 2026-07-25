@@ -99,14 +99,14 @@ jobs:
 
               if sig_lines:
                   sig_block = (
-                      f"\n🎯 <b>إشارات SRA اليوم ({sig_today})</b>\n"
+                      f"\n🎯 <b>إشارات اليوم ({sig_today})</b>\n"
                       "━━━━━━━━━━━━━\n"
                       + "\n".join(sig_lines) + "\n"
                   )
               elif sig_today > 0:
-                  sig_block = f"\n🎯 إشارات SRA اليوم: <b>{sig_today}</b>\n"
+                  sig_block = f"\n🎯 إشارات اليوم: <b>{sig_today}</b>\n"
               else:
-                  sig_block = "\n📭 لا توجد إشارات SRA اليوم\n"
+                  sig_block = "\n📭 لا توجد إشارات اليوم\n"
 
               msg = (
                   f"📡 <b>EGX Radar — {today_str}</b>\n\n"

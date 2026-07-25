@@ -1,3 +1,4 @@
+from datetime import date
 from flask import Blueprint, jsonify, request
 from sqlalchemy import func, case
 from app import db
@@ -127,6 +128,85 @@ def performance():
         "by_version": versions,
         "top_stocks": top_stocks,
     })
+
+
+@performance_bp.get("/api/performance/oos")
+def oos_performance():
+    """
+    GET /api/performance/oos
+    Returns live Out-of-Sample stats for Core Engine v1.0 vs. backtest targets.
+    """
+    BACKTEST_TARGETS = {
+        "STAGE":     {"pf": 2.075, "stars": 5, "label": "Stage Breakout"},
+        "TREND":     {"pf": 1.644, "stars": 4, "label": "Trend Initiation A+/A"},
+        "VOL_RADAR": {"pf": None,  "stars": 3, "label": "Volume Radar (مراقبة فقط)"},
+    }
+    OOS_START = date(2026, 7, 25)
+
+    v1 = StrategyVersion.query.filter_by(version="v1.0").first()
+    v1_id = v1.id if v1 else None
+
+    # All v1.0 signals (PENDING + closed)
+    if v1_id:
+        all_signals = (
+            Opportunity.query
+            .filter(Opportunity.strategy_version_id == v1_id)
+            .all()
+        )
+    else:
+        all_signals = []
+
+    # Closed signals only (WIN/LOSS/EXPIRED)
+    closed = [s for s in all_signals if s.outcome in ("WIN", "LOSS", "EXPIRED")]
+    pending = [s for s in all_signals if s.outcome == "PENDING"]
+
+    def _engine_key(opp_type: str) -> str:
+        if opp_type and opp_type.startswith("STAGE_"):
+            return "STAGE"
+        if opp_type and opp_type.startswith("TREND_"):
+            return "TREND"
+        return "VOL_RADAR"
+
+    by_engine: dict[str, dict] = {}
+    for key, target in BACKTEST_TARGETS.items():
+        sigs    = [s for s in all_signals if _engine_key(s.opp_type) == key]
+        closed_ = [s for s in sigs if s.outcome in ("WIN", "LOSS", "EXPIRED")]
+        wins_   = [s for s in closed_ if s.outcome == "WIN"]
+        by_engine[key] = {
+            "label":             target["label"],
+            "stars":             target["stars"],
+            "backtest_pf":       target["pf"],
+            "total_signals":     len(sigs),
+            "pending":           len([s for s in sigs if s.outcome == "PENDING"]),
+            "closed":            len(closed_),
+            "wins":              len(wins_),
+            "live_pf":           _live_pf(closed_),
+            "live_win_rate":     round(len(wins_) / len(closed_) * 100, 1) if closed_ else None,
+        }
+
+    days_live = (date.today() - OOS_START).days
+
+    return jsonify({
+        "version":     "v1.0",
+        "oos_start":   OOS_START.isoformat(),
+        "days_live":   days_live,
+        "total_signals": len(all_signals),
+        "pending":     len(pending),
+        "closed":      len(closed),
+        "by_engine":   by_engine,
+    })
+
+
+def _live_pf(closed: list) -> float | None:
+    wins   = [s for s in closed if s.outcome == "WIN"]
+    losses = [s for s in closed if s.outcome in ("LOSS", "EXPIRED")]
+    if not losses or not wins:
+        return None
+    gross_wins   = sum(s.pnl_pct for s in wins   if s.pnl_pct)
+    gross_losses = sum(abs(s.pnl_pct) for s in losses if s.pnl_pct)
+    if gross_losses == 0:
+        return None
+    return round(gross_wins / gross_losses, 3)
 
 
 @performance_bp.get("/api/performance/trades")

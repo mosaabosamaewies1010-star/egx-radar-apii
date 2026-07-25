@@ -63,6 +63,10 @@ def create_app(config_name: str = "development") -> Flask:
     from app.routes.bot           import bot_bp
     from app.routes.admin         import admin_bp
     from app.routes.telegram_bot  import telegram_bp
+    from app.routes.stage         import stage_bp
+    from app.routes.volume_radar  import vol_radar_bp
+    from app.routes.trend         import trend_bp
+    from app.routes.position_size import position_size_bp
 
     app.register_blueprint(health_bp)
     app.register_blueprint(stocks_bp)
@@ -81,8 +85,16 @@ def create_app(config_name: str = "development") -> Flask:
     app.register_blueprint(bot_bp)
     app.register_blueprint(admin_bp)
     app.register_blueprint(telegram_bp)
+    app.register_blueprint(stage_bp)
+    app.register_blueprint(vol_radar_bp)
+    app.register_blueprint(trend_bp)
+    app.register_blueprint(position_size_bp)
 
     with app.app_context():
         db.create_all()
+
+    # Seed immutable reference data (idempotent — safe on every restart)
+    from app.services.seed_versions import seed_strategy_versions
+    seed_strategy_versions(app)
 
     return app

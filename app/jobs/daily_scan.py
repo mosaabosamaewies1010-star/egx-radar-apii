@@ -2,17 +2,16 @@
 Background job: scan all active stocks, compute Radar Scores, detect Opportunities.
 Runs at 15:30 Cairo (after regime_job has committed today's regime).
 
-Strategy Layer  (migration to Trend-Initiation — see docs/research/)
---------------
-PRIMARY   — Trend Initiation Engine (fresh EMA20/50 cross + ADX≥20 + RSI>50; net PF ~1.57)
-SECONDARY — SRA Engine (Smart Recovery Accumulation) — bear/crisis module
-LEGACY    — Momentum Radar (radar_score) — still runs during dual-run; the score is
-            explanation-only (research showed it is inverted as an entry gate)
+Core Engine v1.0 (FROZEN — لا تغير المنطق ده لمدة 6 شهور)
+-----------------------------------------------------------
+Priority per stock — only ONE signal fires per day:
+  1st  Stage Breakout  ⭐⭐⭐⭐⭐ — TREND_CROSS today + VOL spike (60b) | Test PF = 2.075
+  2nd  Trend Initiation⭐⭐⭐⭐  — Fresh EMA cross + ADX≥20 + RSI>50   | Test PF = 1.644
+       (A+/A grades only — Grade B PF < 1.0 in backtest → excluded)
+  3rd  Volume Radar    ⭐⭐⭐    — VOL Expansion, no trend yet          | Discovery/Watch only
 
-All run every day, writing separate Opportunity records by opp_type prefix:
-  Momentum: "Breakout" | "Momentum" | "Swing" | "Sharia"
-  SRA:      "SRA_A+"   | "SRA_A"    | "SRA_B"
-  Trend:    "TREND_A+" | "TREND_A"  | "TREND_B"
+RadarScoreHistory is still recorded for every stock (used by stock detail page).
+Old Momentum and SRA engines no longer generate new Opportunity records.
 """
 import logging
 from datetime import date, datetime, timedelta, timezone
@@ -22,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 def run_daily_scan(app) -> None:
     with app.app_context():
-        scan_log = None  # initialised here so the except block can always reference it
+        scan_log = None
         try:
             from app import db
             from app.models.stock import Stock
@@ -30,14 +29,19 @@ def run_daily_scan(app) -> None:
             from app.models.opportunity import Opportunity
             from app.models.regime import MarketRegimeHistory
             from app.models.scan_log import ScanLog
+            from app.models.strategy_version import StrategyVersion
 
-            # Ensure all tables exist (guards against first-run on a fresh DB)
             try:
                 db.create_all()
             except Exception as _ce:
                 logger.warning("daily_scan: db.create_all() warning: %s", _ce)
 
             today = date.today()
+
+            # Look up current strategy version (v1.0) — used to tag every new signal
+            v1 = StrategyVersion.query.filter_by(version="v1.0").first()
+            v1_id = v1.id if v1 else None
+
             try:
                 scan_log = ScanLog(run_date=today, status="running")
                 db.session.add(scan_log)
@@ -46,32 +50,35 @@ def run_daily_scan(app) -> None:
                 db.session.rollback()
                 logger.warning("daily_scan: could not create ScanLog: %s", _sle)
                 scan_log = None
-            # Cap on live yf.Ticker(...).info calls per run — first run after
-            # adding the fundamentals columns has EVERY stock "stale" at once;
-            # without a cap that's ~200 extra network calls in one scan, which
-            # is what spiked memory past Render's free-tier limit on 2026-07-19.
+
+            # Cap on live yf.Ticker(...).info calls — prevents memory spikes on Render free tier
             MAX_FUNDAMENTALS_PER_RUN = 40
             fundamentals_fetched_this_run = 0
+
             from app.services.indicators import compute_indicators
             from app.services.radar_score import compute_radar_score
-            from app.services.opportunity import compute_opportunity
             from app.services.explain import generate_explain
             from app.utils.data_fetcher import (
                 fetch_ohlcv, fetch_multiple, fetch_fundamentals, compute_adt, assess_data_quality,
             )
 
-            # SRA Engine — imported with guard so old scan still runs if unavailable
+            # Breadth calculation — reuses SRA's compute_sra_breadth (no SRA detection needed)
             try:
-                from app.services.sra_engine import (
-                    detect_sra_setup, compute_sra_breadth, compute_sector_slope,
-                )
-                from app.services.knowledge_base import query_similar_setups
-                _SRA_AVAILABLE = True
+                from app.services.sra_engine import compute_sra_breadth
+                _BREADTH_AVAILABLE = True
             except ImportError:
-                logger.warning("daily_scan: sra_engine not available — skipping SRA pass")
-                _SRA_AVAILABLE = False
+                _BREADTH_AVAILABLE = False
+                logger.warning("daily_scan: compute_sra_breadth not available — breadth defaults to 50%%")
 
-            # Trend Initiation Engine — PRIMARY (imported with guard so scan still runs)
+            # Stage Breakout Engine (Primary ⭐⭐⭐⭐⭐) — PF 2.075
+            try:
+                from app.services.stage_engine import detect_stage_breakout
+                _STAGE_AVAILABLE = True
+            except ImportError:
+                logger.warning("daily_scan: stage_engine not available — skipping STAGE pass")
+                _STAGE_AVAILABLE = False
+
+            # Trend Initiation Engine (Secondary ⭐⭐⭐⭐, A+/A only) — PF 1.644
             try:
                 from app.services.trend_engine import detect_trend_initiation
                 _TREND_AVAILABLE = True
@@ -79,41 +86,37 @@ def run_daily_scan(app) -> None:
                 logger.warning("daily_scan: trend_engine not available — skipping TREND pass")
                 _TREND_AVAILABLE = False
 
+            # Volume Radar Engine (Discovery ⭐⭐⭐) — watch signal, not a buy signal
+            try:
+                from app.services.volume_radar_engine import detect_volume_radar
+                _VOL_RADAR_AVAILABLE = True
+            except ImportError:
+                logger.warning("daily_scan: volume_radar_engine not available — skipping VOL_RADAR pass")
+                _VOL_RADAR_AVAILABLE = False
+
             stocks = Stock.query.filter_by(is_active=True).all()
 
-            # ── Regime (old system — kept for Momentum pass) ─────────────────
-            regime_rec = (
-                MarketRegimeHistory.query
-                .order_by(MarketRegimeHistory.run_date.desc())
-                .first()
-            )
-            momentum_regime = regime_rec.regime if regime_rec else "SIDEWAYS"
+            # ── Pre-fetch all OHLCV (6 months) ────────────────────────────────
+            # Used for: (1) per-stock fast df lookup in main loop
+            #           (2) breadth_pct calculation passed to Stage + Trend engines
+            symbols = [s.symbol for s in stocks]
+            logger.info("daily_scan: pre-fetching %d tickers...", len(symbols))
+            all_dfs = fetch_multiple(symbols, period="6mo")
+
+            valid_dfs  = {sym: df for sym, df in all_dfs.items() if df is not None}
+            breadth_pct = 50.0
+            sra_regime  = "neutral"
+
+            if _BREADTH_AVAILABLE and valid_dfs:
+                sra_regime, breadth_pct = compute_sra_breadth(valid_dfs)
+
             logger.info(
-                "daily_scan: %d stocks (momentum_regime=%s)",
-                len(stocks), momentum_regime,
+                "daily_scan: %d stocks | breadth=%.1f%% | regime=%s",
+                len(stocks), breadth_pct, sra_regime,
             )
 
-            # ── Pre-fetch all data for SRA breadth calculation ────────────────
-            # We need the full universe to compute % above EMA50.
-            sra_regime   = "neutral"
-            breadth_pct  = 50.0
-            all_dfs: dict[str, object] = {}
-
-            if _SRA_AVAILABLE:
-                symbols = [s.symbol for s in stocks]
-                logger.info("daily_scan: pre-fetching %d tickers for SRA breadth...", len(symbols))
-                all_dfs = fetch_multiple(symbols, period="6mo")
-                # 6mo ≈ 126 trading days — enough for EMA50 + scan window + buffer
-                valid_dfs = {sym: df for sym, df in all_dfs.items() if df is not None}
-                if valid_dfs:
-                    sra_regime, breadth_pct = compute_sra_breadth(valid_dfs)
-                logger.info(
-                    "daily_scan: SRA regime=%s breadth=%.1f%% (%d/%d tickers have data)",
-                    sra_regime, breadth_pct, len(valid_dfs), len(symbols),
-                )
-
-            # ── Save SRA regime to DB so /api/market/regime returns real data ──
-            if _SRA_AVAILABLE and valid_dfs:
+            # ── Save market regime → DB (admin page + regime detection) ───────
+            if valid_dfs:
                 regime_map = {
                     "bull":    ("BULL",     75.0),
                     "bear":    ("BEAR",     70.0),
@@ -164,19 +167,11 @@ def run_daily_scan(app) -> None:
                         )
                     except Exception:
                         db.session.rollback()
-                        logger.warning(
-                            "daily_scan: regime insert race condition — another thread won, continuing"
-                        )
+                        logger.warning("daily_scan: regime insert race — another thread won, continuing")
 
-            # ── Group stocks by sector for sector slope ───────────────────────
-            # sector_peers[sector] = list of DataFrames for that sector
-            sector_peers: dict[str, list] = {}
-            if _SRA_AVAILABLE:
-                for stock in stocks:
-                    sec = getattr(stock, "sector", None) or "unknown"
-                    df  = all_dfs.get(stock.symbol)
-                    if df is not None:
-                        sector_peers.setdefault(sec, []).append(df)
+            # Legacy regime label for RadarScoreHistory (kept for score explanation text)
+            regime_rec      = MarketRegimeHistory.query.order_by(MarketRegimeHistory.run_date.desc()).first()
+            momentum_regime = regime_rec.regime if regime_rec else "SIDEWAYS"
 
             # ──────────────────────────────────────────────────────────────────
             # Main scan loop
@@ -185,85 +180,74 @@ def run_daily_scan(app) -> None:
 
             for stock in stocks:
                 try:
-                    # ── Fetch OHLCV first — needed by both momentum and SRA ───
-                    df = all_dfs.get(stock.symbol) if all_dfs else None
+                    # ── OHLCV ─────────────────────────────────────────────────
+                    df = all_dfs.get(stock.symbol)
                     if df is None:
                         df = fetch_ohlcv(stock.symbol)
-
                     if df is None:
                         logger.warning("daily_scan: no data for %s", stock.symbol)
                         fail += 1
                         continue
 
-                    # ── PRICE SNAPSHOT — every day, free (df already in hand) ─
-                    # Populates Stock.last_price/day_open/high/low/etc, which
-                    # nothing wrote before (portfolio P&L + the stock page both
-                    # depend on this).
+                    # ── Price snapshot ─────────────────────────────────────────
+                    adt_val = compute_adt(df)
                     try:
                         last = df.iloc[-1]
-                        stock.day_open    = float(last["open"])
-                        stock.day_high    = float(last["high"])
-                        stock.day_low     = float(last["low"])
-                        stock.last_price  = float(last["close"])
-                        stock.last_volume = int(last["volume"])
-                        stock.last_adt    = compute_adt(df)
+                        stock.day_open         = float(last["open"])
+                        stock.day_high         = float(last["high"])
+                        stock.day_low          = float(last["low"])
+                        stock.last_price       = float(last["close"])
+                        stock.last_volume      = int(last["volume"])
+                        stock.last_adt         = adt_val
+                        stock.price_updated_at = datetime.now(timezone.utc)
                         if len(df) >= 2:
                             prev_close = float(df["close"].iloc[-2])
                             if prev_close > 0:
                                 stock.last_change_amt = round(stock.last_price - prev_close, 4)
                                 stock.last_change_pct = round(stock.last_change_amt / prev_close * 100, 2)
-                        stock.price_updated_at = datetime.now(timezone.utc)
                     except Exception:
                         logger.warning("daily_scan: price snapshot failed for %s", stock.symbol, exc_info=True)
 
-                    # ── FUNDAMENTALS — weekly only (separate yfinance .info call,
-                    # heavier than price history; refreshing 200+ stocks daily
-                    # isn't needed since P/E, market cap etc. barely move day to day) ─
+                    # ── Fundamentals (weekly cap) ──────────────────────────────
                     stale = (
                         stock.fundamentals_updated_at is None
                         or stock.fundamentals_updated_at < datetime.now(timezone.utc) - timedelta(days=6)
                     )
                     if stale and fundamentals_fetched_this_run >= MAX_FUNDAMENTALS_PER_RUN:
-                        stale = False   # hit the cap — leave it stale, pick it up next run
+                        stale = False
                     if stale:
                         fundamentals_fetched_this_run += 1
                         try:
                             fnd = fetch_fundamentals(stock.symbol)
                             if fnd:
-                                stock.market_cap      = fnd.get("market_cap")
-                                stock.pe_ratio         = fnd.get("pe_ratio")
-                                stock.eps              = fnd.get("eps")
-                                stock.dividend_yield   = fnd.get("dividend_yield")
-                                stock.week52_high      = fnd.get("week52_high")
-                                stock.week52_low       = fnd.get("week52_low")
-                                stock.book_value       = fnd.get("book_value")
+                                stock.market_cap              = fnd.get("market_cap")
+                                stock.pe_ratio                = fnd.get("pe_ratio")
+                                stock.eps                     = fnd.get("eps")
+                                stock.dividend_yield          = fnd.get("dividend_yield")
+                                stock.week52_high             = fnd.get("week52_high")
+                                stock.week52_low              = fnd.get("week52_low")
+                                stock.book_value              = fnd.get("book_value")
                                 stock.fundamentals_updated_at = datetime.now(timezone.utc)
                         except Exception:
                             logger.warning("daily_scan: fundamentals fetch failed for %s", stock.symbol, exc_info=True)
 
-                    # ── MOMENTUM PASS (old system — unchanged) ────────────────
+                    # ── RadarScoreHistory (all stocks — needed by stock detail page) ─
                     already_scored = RadarScoreHistory.query.filter_by(
                         stock_id=stock.id, run_date=today
                     ).first()
 
                     if not already_scored:
                         quality = assess_data_quality(df, stock.symbol)
-                        adt     = compute_adt(df)
                         ind     = compute_indicators(df, quality)
 
                         if ind is None:
-                            logger.warning(
-                                "daily_scan: insufficient indicators for %s", stock.symbol
-                            )
+                            logger.warning("daily_scan: insufficient indicators for %s", stock.symbol)
                             fail += 1
                         else:
-                            bd         = compute_radar_score(ind, adt, regime=momentum_regime)
-                            explain    = generate_explain(ind, bd, momentum_regime)
-                            opp_result = compute_opportunity(
-                                ind, bd, is_sharia=stock.is_sharia, regime=momentum_regime
-                            )
+                            bd      = compute_radar_score(ind, adt_val, regime=momentum_regime)
+                            explain = generate_explain(ind, bd, momentum_regime)
 
-                            score_rec = RadarScoreHistory(
+                            db.session.add(RadarScoreHistory(
                                 stock_id          = stock.id,
                                 run_date          = today,
                                 score             = bd.final_score,
@@ -288,205 +272,200 @@ def run_daily_scan(app) -> None:
                                 explain_ar        = explain["ar"],
                                 explain_en        = explain["en"],
                                 data_quality      = quality,
-                            )
-                            db.session.add(score_rec)
-
-                            if opp_result:
-                                db.session.add(Opportunity(
-                                    stock_id       = stock.id,
-                                    run_date       = today,
-                                    opp_type       = opp_result.opp_type,
-                                    entry_price    = opp_result.entry_price,
-                                    tp1_price      = opp_result.tp1_price,
-                                    tp2_price      = opp_result.tp2_price,
-                                    sl_price       = opp_result.sl_price,
-                                    rr_ratio       = opp_result.rr_ratio,
-                                    max_hold_days  = opp_result.max_hold_days,
-                                    radar_score    = bd.final_score,
-                                    signal_quality = opp_result.signal_quality,
-                                    outcome        = "PENDING",
-                                ))
-
+                            ))
                             success += 1
                     else:
                         skip += 1
 
-                    # ── SRA PASS — runs independently, own idempotency check ──
-                    # Separate from momentum skip so manual re-triggers can still
-                    # find SRA setups even when RadarScoreHistory already exists.
-                    if _SRA_AVAILABLE:
-                        already_sra = Opportunity.query.filter(
-                            Opportunity.stock_id == stock.id,
-                            Opportunity.run_date == today,
-                            Opportunity.opp_type.like("SRA_%"),
-                        ).first()
+                    # ══════════════════════════════════════════════════════════
+                    # CORE ENGINE v1.0 — Priority Logic (FROZEN)
+                    # Stage → Trend (A+/A) → Volume Radar
+                    # ══════════════════════════════════════════════════════════
 
-                        if not already_sra:
-                            sec             = getattr(stock, "sector", None) or "unknown"
-                            peers           = sector_peers.get(sec, [])
-                            sector_slope    = compute_sector_slope(peers)
-                            sector_positive = sector_slope > 0
+                    # ── 1. STAGE BREAKOUT (Primary ⭐⭐⭐⭐⭐) ──────────────────
+                    stage_today = Opportunity.query.filter(
+                        Opportunity.stock_id == stock.id,
+                        Opportunity.run_date == today,
+                        Opportunity.opp_type.like("STAGE_%"),
+                    ).first()
 
-                            sra = detect_sra_setup(
-                                df              = df,
-                                regime          = sra_regime,
-                                breadth_pct     = breadth_pct,
-                                sector_positive = sector_positive,
-                                min_grade       = "B",
-                                ticker          = stock.symbol,
+                    if stage_today:
+                        # Already has Stage signal — skip lower tiers
+                        db.session.commit()
+                        continue
+
+                    if _STAGE_AVAILABLE:
+                        stage = detect_stage_breakout(
+                            df          = df,
+                            breadth_pct = breadth_pct,
+                            ticker      = stock.symbol,
+                        )
+                        if stage is not None:
+                            s_sl  = min(stage.fast_sl, stage.balanced_sl)
+                            s_rr1 = (
+                                (stage.fast_tp - stage.entry_price) / (stage.entry_price - s_sl)
+                                if stage.entry_price > s_sl else None
                             )
+                            stage_snap = stage.feature_snapshot()
+                            stage_snap["regime"]      = momentum_regime   # regime at signal time
+                            stage_snap["breadth_pct"] = round(breadth_pct, 1)
+                            db.session.add(Opportunity(
+                                stock_id             = stock.id,
+                                run_date             = today,
+                                opp_type             = stage.opp_type,
+                                entry_price          = stage.entry_price,
+                                tp1_price            = stage.fast_tp,
+                                tp2_price            = stage.balanced_tp,
+                                sl_price             = s_sl,
+                                rr_ratio             = round(s_rr1, 2) if s_rr1 else None,
+                                max_hold_days        = stage.balanced_max_bars,
+                                radar_score          = stage.stage_score,
+                                signal_quality       = "HIGH" if stage.strength == "STRONG" else "MEDIUM",
+                                outcome              = "PENDING",
+                                feature_snapshot     = stage_snap,
+                                strategy_version_id  = v1_id,
+                            ))
+                            logger.info(
+                                "daily_scan: STAGE %s — %s (score=%.0f vol_age=%db)",
+                                stock.symbol, stage.opp_type, stage.stage_score, stage.vol_age_bars,
+                            )
+                            db.session.commit()
+                            continue  # Stage wins → skip Trend + Volume for this stock
 
-                            if sra is not None:
-                                sra.ticker = stock.symbol
+                    # ── 2. TREND INITIATION (Secondary ⭐⭐⭐⭐, A+/A only) ─────
+                    # Grade B is excluded — backtest shows PF < 1.0
+                    trend_today = Opportunity.query.filter(
+                        Opportunity.stock_id == stock.id,
+                        Opportunity.run_date == today,
+                        Opportunity.opp_type.like("TREND_%"),
+                    ).first()
 
-                                sl  = min(sra.fast_sl, sra.balanced_sl)
-                                rr1 = ((sra.fast_tp - sra.entry_price) /
-                                       (sra.entry_price - sl)) if sra.entry_price > sl else None
+                    if trend_today:
+                        # Already has Trend signal — skip Volume Radar
+                        db.session.commit()
+                        continue
 
-                                grade_quality = {"A+": "HIGH", "A": "MEDIUM", "B": "LOW"}
-
-                                kb = query_similar_setups(
-                                    db,
-                                    grade           = sra.grade,
-                                    regime          = sra_regime,
-                                    sector_positive = sector_positive,
-                                )
-                                sra.similar_cases        = kb["similar_cases"]
-                                sra.historical_win_rate  = kb["historical_win_rate"]
-                                sra.avg_return           = kb["avg_return"]
-
-                                snap = sra.feature_snapshot()
-                                snap.update({
-                                    "strategy_version":  "SRA_v2",
-                                    "median_return":     kb["median_return"],
-                                    "best_case":         kb["best_case"],
-                                    "worst_case":        kb["worst_case"],
-                                    "avg_win":           kb["avg_win"],
-                                    "avg_loss":          kb["avg_loss"],
-                                    "kb_confidence":     kb["confidence"],
-                                })
-
-                                db.session.add(Opportunity(
-                                    stock_id         = stock.id,
-                                    run_date         = today,
-                                    opp_type         = sra.opp_type,
-                                    entry_price      = sra.entry_price,
-                                    tp1_price        = sra.fast_tp,
-                                    tp2_price        = sra.balanced_tp,
-                                    sl_price         = sl,
-                                    rr_ratio         = round(rr1, 2) if rr1 else None,
-                                    max_hold_days    = sra.balanced_max_bars,
-                                    radar_score      = sra.score,
-                                    signal_quality   = grade_quality.get(sra.grade, "LOW"),
-                                    outcome          = "PENDING",
-                                    feature_snapshot = snap,
-                                ))
-                                logger.info(
-                                    "daily_scan: SRA %s — %s (score=%.0f)",
-                                    stock.symbol, sra.opp_type, sra.score,
-                                )
-
-                    # ── TREND PASS — PRIMARY engine, own idempotency check ────
-                    # Runs independently (opp_type prefix "TREND_") so it coexists
-                    # with SRA + momentum during the dual-run migration.
                     if _TREND_AVAILABLE:
-                        already_trend = Opportunity.query.filter(
-                            Opportunity.stock_id == stock.id,
-                            Opportunity.run_date == today,
-                            Opportunity.opp_type.like("TREND_%"),
-                        ).first()
-
-                        if not already_trend:
-                            trend = detect_trend_initiation(
-                                df          = df,
-                                breadth_pct = breadth_pct,
-                                ticker      = stock.symbol,
+                        trend = detect_trend_initiation(
+                            df          = df,
+                            breadth_pct = breadth_pct,
+                            ticker      = stock.symbol,
+                        )
+                        if trend is not None and trend.grade in ("A+", "A"):
+                            t_sl  = min(trend.fast_sl, trend.balanced_sl)
+                            t_rr1 = (
+                                (trend.fast_tp - trend.entry_price) / (trend.entry_price - t_sl)
+                                if trend.entry_price > t_sl else None
                             )
+                            trend_snap = trend.feature_snapshot()
+                            trend_snap["regime"]      = momentum_regime   # regime at signal time
+                            trend_snap["breadth_pct"] = round(breadth_pct, 1)
+                            db.session.add(Opportunity(
+                                stock_id             = stock.id,
+                                run_date             = today,
+                                opp_type             = trend.opp_type,
+                                entry_price          = trend.entry_price,
+                                tp1_price            = trend.fast_tp,
+                                tp2_price            = trend.balanced_tp,
+                                sl_price             = t_sl,
+                                rr_ratio             = round(t_rr1, 2) if t_rr1 else None,
+                                max_hold_days        = trend.balanced_max_bars,
+                                radar_score          = trend.trend_strength,
+                                signal_quality       = "HIGH" if trend.grade == "A+" else "MEDIUM",
+                                outcome              = "PENDING",
+                                feature_snapshot     = trend_snap,
+                                strategy_version_id  = v1_id,
+                            ))
+                            logger.info(
+                                "daily_scan: TREND %s — %s (strength=%.0f grade=%s)",
+                                stock.symbol, trend.opp_type, trend.trend_strength, trend.grade,
+                            )
+                            db.session.commit()
+                            continue  # Trend wins → skip Volume for this stock
 
-                            if trend is not None:
-                                t_sl  = min(trend.fast_sl, trend.balanced_sl)
-                                t_rr1 = ((trend.fast_tp - trend.entry_price) /
-                                         (trend.entry_price - t_sl)) if trend.entry_price > t_sl else None
-                                t_quality = {"A+": "HIGH", "A": "MEDIUM", "B": "LOW"}
+                    # ── 3. VOLUME RADAR (Discovery ⭐⭐⭐) ──────────────────────
+                    # Watch signal only — السهم في مرحلة تجميع، راقبه للـ Stage القادم
+                    vol_today = Opportunity.query.filter(
+                        Opportunity.stock_id == stock.id,
+                        Opportunity.run_date == today,
+                        Opportunity.opp_type == "VOL_RADAR",
+                    ).first()
 
-                                db.session.add(Opportunity(
-                                    stock_id         = stock.id,
-                                    run_date         = today,
-                                    opp_type         = trend.opp_type,
-                                    entry_price      = trend.entry_price,
-                                    tp1_price        = trend.fast_tp,
-                                    tp2_price        = trend.balanced_tp,
-                                    sl_price         = t_sl,
-                                    rr_ratio         = round(t_rr1, 2) if t_rr1 else None,
-                                    max_hold_days    = trend.balanced_max_bars,
-                                    radar_score      = trend.trend_strength,
-                                    signal_quality   = t_quality.get(trend.grade, "LOW"),
-                                    outcome          = "PENDING",
-                                    feature_snapshot = trend.feature_snapshot(),
-                                ))
-                                logger.info(
-                                    "daily_scan: TREND %s — %s (strength=%.0f)",
-                                    stock.symbol, trend.opp_type, trend.trend_strength,
-                                )
+                    if not vol_today and _VOL_RADAR_AVAILABLE:
+                        vol = detect_volume_radar(df=df, adt=adt_val, ticker=stock.symbol)
+                        if vol is not None:
+                            vol_snap = vol.feature_snapshot()
+                            vol_snap["regime"]      = momentum_regime   # regime at signal time
+                            vol_snap["breadth_pct"] = round(breadth_pct, 1)
+                            db.session.add(Opportunity(
+                                stock_id             = stock.id,
+                                run_date             = today,
+                                opp_type             = "VOL_RADAR",
+                                entry_price          = vol.close,
+                                tp1_price            = None,
+                                tp2_price            = None,
+                                sl_price             = None,
+                                rr_ratio             = None,
+                                max_hold_days        = 60,
+                                radar_score          = vol.vol_rvol * 10,
+                                signal_quality       = "LOW",
+                                outcome              = "PENDING",
+                                feature_snapshot     = vol_snap,
+                                strategy_version_id  = v1_id,
+                            ))
+                            logger.info(
+                                "daily_scan: VOL_RADAR %s (vol_age=%db rvol=%.1f gap=%.1f%%)",
+                                stock.symbol, vol.vol_age_bars, vol.vol_rvol, vol.ema_gap_pct,
+                            )
 
                     db.session.commit()
 
                 except Exception:
                     db.session.rollback()
-                    logger.warning(
-                        "daily_scan: error for %s", stock.symbol, exc_info=True
-                    )
+                    logger.warning("daily_scan: error for %s", stock.symbol, exc_info=True)
                     fail += 1
 
-            logger.info(
-                "daily_scan: done — success=%d, skip=%d, fail=%d",
-                success, skip, fail,
-            )
+            logger.info("daily_scan: done — success=%d, skip=%d, fail=%d", success, skip, fail)
 
-            # ── Update ScanLog ───────────────────────────────────────────────
-            sra_count = Opportunity.query.filter(
-                Opportunity.opp_type.like("SRA_%"), Opportunity.run_date == today
+            # ── Summary counts ─────────────────────────────────────────────────
+            stage_count = Opportunity.query.filter(
+                Opportunity.opp_type.like("STAGE_%"), Opportunity.run_date == today
             ).count()
             trend_count = Opportunity.query.filter(
                 Opportunity.opp_type.like("TREND_%"), Opportunity.run_date == today
             ).count()
-            # Momentum = everything that is neither SRA nor TREND
-            momentum_count = Opportunity.query.filter(
-                ~Opportunity.opp_type.like("SRA_%"),
-                ~Opportunity.opp_type.like("TREND_%"),
-                Opportunity.run_date == today,
-            ).count()
-            kb_size = Opportunity.query.filter(
-                Opportunity.opp_type.like("SRA_%"),
-                Opportunity.outcome.in_(["WIN", "LOSS"])
+            vol_radar_count = Opportunity.query.filter(
+                Opportunity.opp_type == "VOL_RADAR", Opportunity.run_date == today
             ).count()
 
-            # ── Dual-run summary (temporary monitoring during migration) ──────
+            stage_syms = [
+                o.stock.symbol for o in Opportunity.query.filter(
+                    Opportunity.opp_type.like("STAGE_%"), Opportunity.run_date == today
+                ).all()
+            ]
             trend_syms = [
                 o.stock.symbol for o in Opportunity.query.filter(
                     Opportunity.opp_type.like("TREND_%"), Opportunity.run_date == today
                 ).all()
             ]
-            sra_syms = [
-                o.stock.symbol for o in Opportunity.query.filter(
-                    Opportunity.opp_type.like("SRA_%"), Opportunity.run_date == today
-                ).all()
-            ]
-            logger.info("daily_scan: ===== DUAL-RUN SUMMARY =====")
+
+            logger.info("daily_scan: ===== CORE ENGINE v1.0 SUMMARY =====")
+            logger.info("daily_scan: STAGE (%d): %s", stage_count, ", ".join(stage_syms) or "-")
             logger.info("daily_scan: TREND (%d): %s", trend_count, ", ".join(trend_syms) or "-")
-            logger.info("daily_scan: SRA   (%d): %s", sra_count, ", ".join(sra_syms) or "-")
-            logger.info("daily_scan: MOMENTUM (%d)", momentum_count)
-            logger.info("daily_scan: scanned=%d success=%d skip=%d fail=%d",
-                        success + skip + fail, success, skip, fail)
-            logger.info("daily_scan: ============================")
+            logger.info("daily_scan: VOL_RADAR (%d)", vol_radar_count)
+            logger.info(
+                "daily_scan: scanned=%d success=%d skip=%d fail=%d",
+                success + skip + fail, success, skip, fail,
+            )
+            logger.info("daily_scan: ========================================")
 
             if scan_log is not None:
                 scan_log.stocks_scanned   = success + skip + fail
-                scan_log.sra_signals      = sra_count
-                scan_log.momentum_signals = momentum_count
-                scan_log.kb_size          = kb_size
-                scan_log.regime           = sra_regime if _SRA_AVAILABLE else momentum_regime
-                scan_log.breadth_pct      = breadth_pct if _SRA_AVAILABLE else None
+                scan_log.sra_signals      = stage_count + trend_count + vol_radar_count
+                scan_log.momentum_signals = stage_count
+                scan_log.kb_size          = 0
+                scan_log.regime           = sra_regime
+                scan_log.breadth_pct      = breadth_pct
                 scan_log.status           = "success" if fail == 0 else "partial"
                 scan_log.finished_at      = datetime.now(timezone.utc)
                 db.session.commit()
