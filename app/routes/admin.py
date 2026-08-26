@@ -632,6 +632,28 @@ def reject_payment(payment_id: int):
     return jsonify({"ok": True, "payment_id": payment_id})
 
 
+# ── Trigger outcome_job synchronously ────────────────────────────────────────
+
+@admin_bp.post("/api/admin/trigger-outcome")
+def trigger_outcome():
+    """
+    Run outcome_job synchronously and return its execution summary.
+    HTTP 200 means the job completed (not merely started).
+    Protected by BOT_API_KEY.
+    """
+    err = _check_key()
+    if err:
+        return err
+
+    from flask import current_app
+    from app.jobs.outcome_job import run_outcome_job
+
+    app    = current_app._get_current_object()
+    result = run_outcome_job(app)
+
+    return jsonify({"ok": True, "result": result}), 200
+
+
 # ── Trigger daily scan manually ──────────────────────────────────────────────
 
 @admin_bp.post("/api/admin/trigger-scan")

@@ -1,0 +1,116 @@
+name: EGX Outcome Job
+
+on:
+  schedule:
+    # 14:00 UTC = 16:00 Cairo.
+    # Africa/Cairo is fixed at UTC+2 year-round — Egypt has not observed DST since 2011.
+    # No seasonal adjustment needed. EGX trades Sun–Thu (days 0–4 in cron).
+    - cron: '0 14 * * 0,1,2,3,4'
+  workflow_dispatch:
+
+concurrency:
+  group: egx-outcome-job
+  cancel-in-progress: false
+
+jobs:
+  run-outcome:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Run outcome_job (synchronous — HTTP 200 = job completed)
+        run: |
+          RESPONSE=$(curl -s -o response.json -w "%{http_code}" \
+            --max-time 110 \
+            -X POST "${{ secrets.RENDER_API_URL }}/api/admin/trigger-outcome" \
+            -H "X-API-Key: ${{ secrets.BOT_API_KEY }}" \
+            -H "Content-Type: application/json")
+
+          echo "HTTP status: $RESPONSE"
+          echo "=== Response ==="
+          cat response.json
+          echo ""
+
+          python3 - <<'PYEOF'
+          import json, sys
+
+          try:
+              with open("response.json") as f:
+                  d = json.load(f)
+              r = d.get("result", {})
+              print(f"status:              {r.get('status', '?')}")
+              print(f"strategy_version_id: {r.get('strategy_version_id', '?')}")
+              print(f"pending_before:      {r.get('pending_before', '?')}")
+              print(f"pending_after:       {r.get('pending_after', '?')}")
+              print(f"pending_legacy:      {r.get('pending_legacy', '?')}  (informational — never processed)")
+              print(f"scanned:             {r.get('scanned', '?')}")
+              print(f"closed:              {r.get('closed', '?')}")
+              print(f"  TP1:               {r.get('tp1', 0)}")
+              print(f"  TP2:               {r.get('tp2', 0)}")
+              print(f"  SL:                {r.get('sl', 0)}")
+              print(f"  timeout:           {r.get('timeout', 0)}")
+              print(f"skipped:             {r.get('skipped', 0)}")
+              print(f"errors:              {r.get('errors', 0)}")
+              print(f"duration:            {r.get('duration_seconds', '?')}s")
+
+              status = r.get("status", "")
+              if status in ("error", "suspicious_zero_closed",
+                            "aborted_safety_cap", "aborted_v1_not_found",
+                            "aborted_v1_ambiguous"):
+                  print(f"\nWARNING: status={status} — job needs investigation", file=sys.stderr)
+                  sys.exit(1)
+          except Exception as e:
+              print(f"Parse error: {e}", file=sys.stderr)
+              sys.exit(1)
+          PYEOF
+
+          if [ "$RESPONSE" != "200" ]; then
+            echo "ERROR: HTTP $RESPONSE"
+            exit 1
+          fi
+
+      - name: Send failure alert
+        if: failure()
+        env:
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python3 - <<'PYEOF'
+          import os, json
+          from urllib import request as ureq
+          from datetime import date
+
+          TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
+          CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+          today   = date.today().strftime("%Y-%m-%d")
+
+          try:
+              with open("response.json") as f:
+                  d = json.load(f)
+              r      = d.get("result", {})
+              status = r.get("status", "?")
+              detail = (
+                  f"status={status} | "
+                  f"closed={r.get('closed','?')} | "
+                  f"errors={r.get('errors','?')}"
+              )
+          except Exception:
+              detail = "لا يوجد response"
+
+          msg = (
+              f"🚨 <b>EGX Radar — {today}</b>\n\n"
+              f"فشل outcome_job\n{detail}\n"
+              "راجع GitHub Actions للتفاصيل"
+          )
+          payload = json.dumps({"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"}).encode()
+          req = ureq.Request(
+              f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+              data=payload,
+              headers={"Content-Type": "application/json"},
+              method="POST",
+          )
+          try:
+              ureq.urlopen(req, timeout=10)
+          except Exception as e:
+              print(f"Telegram alert failed: {e}")
+          PYEOF
