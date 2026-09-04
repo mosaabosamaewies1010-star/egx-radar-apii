@@ -4,14 +4,19 @@ Runs at 15:30 Cairo (after regime_job has committed today's regime).
 
 Core Engine v1.0 (FROZEN — لا تغير المنطق ده لمدة 6 شهور)
 -----------------------------------------------------------
-Priority per stock — only ONE signal fires per day:
+Priority per stock — only ONE signal fires per day (Stage/Trend/Vol chain):
   1st  Stage Breakout  ⭐⭐⭐⭐⭐ — TREND_CROSS today + VOL spike (60b) | Test PF = 2.075
   2nd  Trend Initiation⭐⭐⭐⭐  — Fresh EMA cross + ADX≥20 + RSI>50   | Test PF = 1.644
        (A+/A grades only — Grade B PF < 1.0 in backtest → excluded)
   3rd  Volume Radar    ⭐⭐⭐    — VOL Expansion, no trend yet          | Discovery/Watch only
 
+SRA Engine (Engine Comparison pass — SEPARATE from priority chain):
+  SRA runs independently on ALL stocks after the main loop.
+  A stock can have both a STAGE_/TREND_ signal AND an SRA_ signal on the same day.
+  Purpose: Engine Comparison v1 — measure SRA vs Stage/Trend overlap and alpha.
+
 RadarScoreHistory is still recorded for every stock (used by stock detail page).
-Old Momentum and SRA engines no longer generate new Opportunity records.
+Old Momentum engine no longer generates new Opportunity records.
 """
 import logging
 from datetime import date, datetime, timedelta, timezone
@@ -62,13 +67,15 @@ def run_daily_scan(app) -> None:
                 fetch_ohlcv, fetch_multiple, fetch_fundamentals, compute_adt, assess_data_quality,
             )
 
-            # Breadth calculation — reuses SRA's compute_sra_breadth (no SRA detection needed)
+            # Breadth calculation + SRA Engine (Engine Comparison pass)
             try:
-                from app.services.sra_engine import compute_sra_breadth
+                from app.services.sra_engine import compute_sra_breadth, detect_sra_setup
                 _BREADTH_AVAILABLE = True
+                _SRA_AVAILABLE = True
             except ImportError:
                 _BREADTH_AVAILABLE = False
-                logger.warning("daily_scan: compute_sra_breadth not available — breadth defaults to 50%%")
+                _SRA_AVAILABLE = False
+                logger.warning("daily_scan: sra_engine not available — breadth defaults to 50%%, SRA skipped")
 
             # Stage Breakout Engine (Primary ⭐⭐⭐⭐⭐) — PF 2.075
             try:
@@ -426,6 +433,68 @@ def run_daily_scan(app) -> None:
                     fail += 1
 
             logger.info("daily_scan: done — success=%d, skip=%d, fail=%d", success, skip, fail)
+
+            # ══════════════════════════════════════════════════════════════════
+            # SRA ENGINE — Independent pass for Engine Comparison v1
+            # Runs on ALL stocks regardless of Stage/Trend/Vol signals.
+            # ══════════════════════════════════════════════════════════════════
+            sra_new = 0
+            if _SRA_AVAILABLE:
+                for stock in stocks:
+                    try:
+                        df = all_dfs.get(stock.symbol)
+                        if df is None:
+                            continue
+                        existing_sra = Opportunity.query.filter(
+                            Opportunity.stock_id == stock.id,
+                            Opportunity.run_date == today,
+                            Opportunity.opp_type.like("SRA_%"),
+                        ).first()
+                        if existing_sra:
+                            continue
+                        sra = detect_sra_setup(
+                            df=df,
+                            ticker=stock.symbol,
+                            breadth_pct=breadth_pct,
+                            regime=sra_regime,
+                            sector_positive=True,
+                            min_grade="A",
+                        )
+                        if sra is not None and sra.grade in ("A+", "A"):
+                            s_sl = min(sra.fast_sl, sra.balanced_sl)
+                            s_rr = (
+                                (sra.fast_tp - sra.entry_price) / (sra.entry_price - s_sl)
+                                if sra.entry_price > s_sl else None
+                            )
+                            snap = sra.feature_snapshot()
+                            snap["regime"]      = momentum_regime
+                            snap["breadth_pct"] = round(breadth_pct, 1)
+                            db.session.add(Opportunity(
+                                stock_id            = stock.id,
+                                run_date            = today,
+                                opp_type            = sra.opp_type,
+                                entry_price         = sra.entry_price,
+                                tp1_price           = sra.fast_tp,
+                                tp2_price           = sra.balanced_tp,
+                                sl_price            = s_sl,
+                                rr_ratio            = round(s_rr, 2) if s_rr else None,
+                                max_hold_days       = sra.balanced_max_bars,
+                                radar_score         = sra.score,
+                                signal_quality      = "HIGH" if sra.grade == "A+" else "MEDIUM",
+                                outcome             = "PENDING",
+                                feature_snapshot    = snap,
+                                strategy_version_id = v1_id,
+                            ))
+                            db.session.commit()
+                            sra_new += 1
+                            logger.info(
+                                "daily_scan: SRA %s — %s (score=%.0f rvol=%.1f)",
+                                stock.symbol, sra.opp_type, sra.score, sra.rvol_spike,
+                            )
+                    except Exception:
+                        db.session.rollback()
+                        logger.warning("daily_scan: SRA error for %s", stock.symbol, exc_info=True)
+            logger.info("daily_scan: SRA new signals=%d", sra_new)
 
             # ── Summary counts ─────────────────────────────────────────────────
             stage_count = Opportunity.query.filter(
