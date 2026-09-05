@@ -16,10 +16,11 @@ def create_scheduler(app) -> BackgroundScheduler:
     """Build and return a configured BackgroundScheduler (not yet started)."""
     scheduler = BackgroundScheduler(timezone=CAIRO_TZ)
 
-    from app.jobs.regime_job  import run_regime_job
-    from app.jobs.daily_scan  import run_daily_scan
-    from app.jobs.outcome_job import run_outcome_job
-    from app.jobs.expire_pro  import run_expire_pro_job
+    from app.jobs.regime_job           import run_regime_job
+    from app.jobs.daily_scan           import run_daily_scan
+    from app.jobs.outcome_job          import run_outcome_job
+    from app.jobs.expire_pro           import run_expire_pro_job
+    from app.jobs.comparison_update_job import run_comparison_update_job
 
     # 15:00 Cairo — compute market regime (30 min after close)
     scheduler.add_job(
@@ -44,6 +45,15 @@ def create_scheduler(app) -> BackgroundScheduler:
         func=lambda: run_outcome_job(app),
         trigger=CronTrigger(day_of_week="sun,mon,tue,wed,thu", hour=16, minute=0, timezone=CAIRO_TZ),
         id="outcome_job",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
+    # 16:05 Cairo — fill forward-path fields in engine_comparison_logs
+    scheduler.add_job(
+        func=lambda: run_comparison_update_job(app),
+        trigger=CronTrigger(day_of_week="sun,mon,tue,wed,thu", hour=16, minute=5, timezone=CAIRO_TZ),
+        id="comparison_update_job",
         replace_existing=True,
         misfire_grace_time=3600,
     )
