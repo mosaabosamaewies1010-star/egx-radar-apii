@@ -70,6 +70,6 @@ def create_scheduler(app) -> BackgroundScheduler:
 
     logger.info(
         "Scheduler configured: regime_job@15:00, daily_scan@15:30, "
-        "outcome_job@16:00, expire_pro_job@00:05 (Cairo)"
+        "outcome_job@16:00, comparison_update_job@16:05, expire_pro_job@00:05 (Cairo)"
     )
     return scheduler

@@ -2,14 +2,36 @@
 Engine Comparison Log — canonical record for Engine Comparison v1.
 
 One row per (signal_date, symbol, engine). Written by daily_scan.py immediately
-after each engine commits its Opportunity. Forward-path fields are filled later
+after each engine flushes its Opportunity. Forward-path fields are filled later
 by comparison_update_job (runs at 16:05 Cairo after markets close).
 
-Common Evaluation Layer applies the same success definition to all engines:
-    COMMON_TP = +7.0%  from entry_price  (first bar entry_price crosses this → TP1)
-    COMMON_SL = -5.0%  from entry_price  (first bar entry_price crosses this → SL)
-    COMMON_MAX_HOLD = 10 trading days
-This is separate from each engine's own native tp/sl, which are also stored.
+Key design decisions
+--------------------
+reference_price
+    Always df["close"].iloc[-1] at scan time — the price a trader would see
+    right after market close. Used for ALL forward-return calculations so that
+    every engine is evaluated from the same reference point.
+
+    SRA native entry_price is close[sl_idx] * 1.002 (historical swing-low
+    price). It is stored for information but NEVER used in forward-return or
+    eval calculations — reference_price is used instead.
+
+Common Evaluation Layer
+    Same binary test for ALL engines:
+        COMMON_TP = +7.0%  from reference_price → eval_status = "TP"
+        COMMON_SL = -5.0%  from reference_price → eval_status = "SL"
+        COMMON_MAX_HOLD = 10 trading sessions
+    eval_status stays "EXPIRED" if neither threshold is reached in 10 days —
+    the status NEVER converts to WIN/LOSS.  Instead, expiry_pnl_pct records
+    the actual mark-to-market return at day 10.
+
+Two independent performance lenses
+    1. Common Target Test  — eval_status (TP | SL | EXPIRED), eval_pnl_pct
+    2. 10-Day MTM Return   — fwd_10d_pct and expiry_pnl_pct (from reference)
+
+Duplicate guard
+    UniqueConstraint on (signal_date, symbol, engine) prevents double-writes
+    if the scan trigger fires twice in the same day.
 """
 from datetime import datetime, timezone
 from app import db
@@ -17,6 +39,12 @@ from app import db
 
 class EngineComparisonLog(db.Model):
     __tablename__ = "engine_comparison_logs"
+    __table_args__ = (
+        db.UniqueConstraint(
+            "signal_date", "symbol", "engine",
+            name="uq_cmp_log_date_sym_engine",
+        ),
+    )
 
     id          = db.Column(db.Integer, primary_key=True)
     setup_id    = db.Column(db.String(32), nullable=False, index=True)   # YYYYMMDD_SYMBOL
@@ -29,13 +57,19 @@ class EngineComparisonLog(db.Model):
         db.Integer, db.ForeignKey("opportunities.id"), nullable=True, index=True
     )
 
-    # ── Engine native levels ───────────────────────────────────────────────────
-    entry_price   = db.Column(db.Float, nullable=True)
+    # ── Engine native levels (kept verbatim from each engine) ─────────────────
+    entry_price   = db.Column(db.Float, nullable=True)   # engine-native entry (SRA may differ)
     tp1_price     = db.Column(db.Float, nullable=True)
     tp2_price     = db.Column(db.Float, nullable=True)
     sl_price      = db.Column(db.Float, nullable=True)
     rr_ratio      = db.Column(db.Float, nullable=True)
     max_hold_days = db.Column(db.Integer, nullable=True)
+
+    # ── Canonical reference for all forward-return / eval calculations ────────
+    # Always df["close"].iloc[-1] at scan time for EVERY engine.
+    # For STAGE/TREND/VOL_RADAR this equals entry_price.
+    # For SRA this differs from entry_price (which is swing-low based).
+    reference_price = db.Column(db.Float, nullable=True)
 
     # ── Score / grade at signal time ───────────────────────────────────────────
     score = db.Column(db.Float, nullable=True)    # engine-specific 0-100 or raw
@@ -49,7 +83,8 @@ class EngineComparisonLog(db.Model):
     rsi         = db.Column(db.Float, nullable=True)
 
     # ── Forward path — filled by comparison_update_job ────────────────────────
-    fwd_1d_pct  = db.Column(db.Float, nullable=True)   # (close_+1d / entry) - 1  × 100
+    # Returns are (close_+Nd / reference_price - 1) × 100
+    fwd_1d_pct  = db.Column(db.Float, nullable=True)
     fwd_3d_pct  = db.Column(db.Float, nullable=True)
     fwd_5d_pct  = db.Column(db.Float, nullable=True)
     fwd_10d_pct = db.Column(db.Float, nullable=True)
@@ -58,14 +93,21 @@ class EngineComparisonLog(db.Model):
     days_to_mfe = db.Column(db.Integer, nullable=True)
 
     # ── Common Evaluation Layer ────────────────────────────────────────────────
-    # Same definition for ALL engines: +7% TP, -5% SL, 10-day horizon
-    eval_tp_pct   = db.Column(db.Float, default=7.0)   # reference TP used
-    eval_sl_pct   = db.Column(db.Float, default=5.0)   # reference SL used (absolute %)
-    eval_hit_tp   = db.Column(db.Boolean, nullable=True)   # price hit +7% first
-    eval_hit_sl   = db.Column(db.Boolean, nullable=True)   # price hit -5% first
-    eval_status   = db.Column(db.String(20), nullable=True) # TP|SL|EXPIRED|OPEN
-    eval_pnl_pct  = db.Column(db.Float, nullable=True)     # realized % at exit
+    eval_tp_pct    = db.Column(db.Float, default=7.0)   # reference TP threshold used
+    eval_sl_pct    = db.Column(db.Float, default=5.0)   # reference SL threshold used (absolute)
+    eval_hit_tp    = db.Column(db.Boolean, nullable=True)
+    eval_hit_sl    = db.Column(db.Boolean, nullable=True)
+    eval_status    = db.Column(db.String(20), nullable=True)  # TP|SL|EXPIRED|OPEN
+    eval_pnl_pct   = db.Column(db.Float, nullable=True)       # +7.0 / -5.0 / actual (EXPIRED)
     eval_hold_days = db.Column(db.Integer, nullable=True)
+    eval_exit_date = db.Column(db.Date, nullable=True)        # calendar date of exit
+
+    # ── Expiry mark-to-market (close of exit bar) ──────────────────────────────
+    # For TP/SL:    close of the day the threshold was first breached intraday
+    # For EXPIRED:  close of the 10th trading session
+    # expiry_pnl_pct = (expiry_close / reference_price - 1) × 100
+    expiry_close   = db.Column(db.Float, nullable=True)
+    expiry_pnl_pct = db.Column(db.Float, nullable=True)
 
     path_updated_at = db.Column(db.DateTime, nullable=True)
     created_at      = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
@@ -78,37 +120,43 @@ class EngineComparisonLog(db.Model):
 
     def to_dict(self) -> dict:
         return {
-            "setup_id":    self.setup_id,
-            "date":        self.signal_date.isoformat() if self.signal_date else None,
-            "symbol":      self.symbol,
-            "engine":      self.engine,
-            "signal_type": self.signal_type,
-            "score":       self.score,
-            "grade":       self.grade,
-            "entry":       self.entry_price,
-            "tp1":         self.tp1_price,
-            "tp2":         self.tp2_price,
-            "sl":          self.sl_price,
-            "rr":          self.rr_ratio,
-            "regime":      self.regime,
-            "breadth_pct": self.breadth_pct,
-            "rvol":        self.rvol,
-            "adx":         self.adx,
-            "rsi":         self.rsi,
+            "setup_id":        self.setup_id,
+            "date":            self.signal_date.isoformat() if self.signal_date else None,
+            "symbol":          self.symbol,
+            "engine":          self.engine,
+            "signal_type":     self.signal_type,
+            "score":           self.score,
+            "grade":           self.grade,
+            "entry_native":    self.entry_price,
+            "reference_price": self.reference_price,
+            "tp1":             self.tp1_price,
+            "tp2":             self.tp2_price,
+            "sl":              self.sl_price,
+            "rr":              self.rr_ratio,
+            "regime":          self.regime,
+            "breadth_pct":     self.breadth_pct,
+            "rvol":            self.rvol,
+            "adx":             self.adx,
+            "rsi":             self.rsi,
             "forward": {
-                "fwd_1d":   self.fwd_1d_pct,
-                "fwd_3d":   self.fwd_3d_pct,
-                "fwd_5d":   self.fwd_5d_pct,
-                "fwd_10d":  self.fwd_10d_pct,
-                "mfe":      self.mfe_pct,
-                "mae":      self.mae_pct,
+                "fwd_1d":      self.fwd_1d_pct,
+                "fwd_3d":      self.fwd_3d_pct,
+                "fwd_5d":      self.fwd_5d_pct,
+                "fwd_10d":     self.fwd_10d_pct,
+                "mfe":         self.mfe_pct,
+                "mae":         self.mae_pct,
                 "days_to_mfe": self.days_to_mfe,
             },
             "eval": {
-                "status":    self.eval_status,
-                "hit_tp":    self.eval_hit_tp,
-                "hit_sl":    self.eval_hit_sl,
-                "pnl_pct":   self.eval_pnl_pct,
-                "hold_days": self.eval_hold_days,
+                "status":      self.eval_status,
+                "hit_tp":      self.eval_hit_tp,
+                "hit_sl":      self.eval_hit_sl,
+                "pnl_pct":     self.eval_pnl_pct,
+                "hold_days":   self.eval_hold_days,
+                "exit_date":   self.eval_exit_date.isoformat() if self.eval_exit_date else None,
+            },
+            "expiry": {
+                "close":   self.expiry_close,
+                "pnl_pct": self.expiry_pnl_pct,
             },
         }

@@ -85,31 +85,39 @@ def run_daily_scan(app) -> None:
                 _CMP_LOG_AVAILABLE = False
                 logger.warning("daily_scan: EngineComparisonLog not available — comparison logging skipped")
 
-            def _log_cmp(engine, signal_type, opp_id, entry, tp1, tp2, sl, rr, hold,
-                         score, grade, snap):
+            def _log_cmp(engine, signal_type, opp_id, entry, ref_price,
+                         tp1, tp2, sl, rr, hold, score, grade, snap):
+                """Write one canonical comparison row.
+
+                ref_price — always df["close"].iloc[-1] at scan time.
+                    For STAGE/TREND/VOL_RADAR this equals entry_price.
+                    For SRA it differs (entry is swing-low based); ref_price
+                    is what the update job uses for ALL forward-return math.
+                """
                 if not _CMP_LOG_AVAILABLE:
                     return
                 try:
                     db.session.add(EngineComparisonLog(
-                        setup_id       = EngineComparisonLog.build_setup_id(today, stock.symbol),
-                        signal_date    = today,
-                        symbol         = stock.symbol,
-                        engine         = engine,
-                        signal_type    = signal_type,
-                        opportunity_id = opp_id,
-                        entry_price    = entry,
-                        tp1_price      = tp1,
-                        tp2_price      = tp2,
-                        sl_price       = sl,
-                        rr_ratio       = rr,
-                        max_hold_days  = hold,
-                        score          = score,
-                        grade          = grade,
-                        regime         = snap.get("regime"),
-                        breadth_pct    = snap.get("breadth_pct"),
-                        rvol           = snap.get("rvol"),
-                        adx            = snap.get("adx"),
-                        rsi            = snap.get("rsi"),
+                        setup_id        = EngineComparisonLog.build_setup_id(today, stock.symbol),
+                        signal_date     = today,
+                        symbol          = stock.symbol,
+                        engine          = engine,
+                        signal_type     = signal_type,
+                        opportunity_id  = opp_id,
+                        entry_price     = entry,
+                        reference_price = ref_price,
+                        tp1_price       = tp1,
+                        tp2_price       = tp2,
+                        sl_price        = sl,
+                        rr_ratio        = rr,
+                        max_hold_days   = hold,
+                        score           = score,
+                        grade           = grade,
+                        regime          = snap.get("regime"),
+                        breadth_pct     = snap.get("breadth_pct"),
+                        rvol            = snap.get("rvol"),
+                        adx             = snap.get("adx"),
+                        rsi             = snap.get("rsi"),
                     ))
                 except Exception:
                     logger.warning("daily_scan: _log_cmp failed for %s", stock.symbol, exc_info=True)
@@ -373,7 +381,8 @@ def run_daily_scan(app) -> None:
                             db.session.flush()
                             _log_cmp(
                                 "STAGE", stage.opp_type, _stage_opp.id,
-                                stage.entry_price, stage.fast_tp, stage.balanced_tp, s_sl,
+                                stage.entry_price, stage.entry_price,   # entry == ref for STAGE
+                                stage.fast_tp, stage.balanced_tp, s_sl,
                                 round(s_rr1, 2) if s_rr1 else None, stage.balanced_max_bars,
                                 stage.stage_score, stage.strength, stage_snap,
                             )
@@ -432,7 +441,8 @@ def run_daily_scan(app) -> None:
                             db.session.flush()
                             _log_cmp(
                                 "TREND", trend.opp_type, _trend_opp.id,
-                                trend.entry_price, trend.fast_tp, trend.balanced_tp, t_sl,
+                                trend.entry_price, trend.entry_price,   # entry == ref for TREND
+                                trend.fast_tp, trend.balanced_tp, t_sl,
                                 round(t_rr1, 2) if t_rr1 else None, trend.balanced_max_bars,
                                 trend.trend_strength, trend.grade, trend_snap,
                             )
@@ -477,7 +487,8 @@ def run_daily_scan(app) -> None:
                             db.session.flush()
                             _log_cmp(
                                 "VOL_RADAR", "VOL_RADAR", _vol_opp.id,
-                                vol.close, None, None, None, None, 60,
+                                vol.close, vol.close,   # entry == ref for VOL_RADAR
+                                None, None, None, None, 60,
                                 vol.vol_rvol * 10, None, vol_snap,
                             )
                             logger.info(
@@ -547,9 +558,13 @@ def run_daily_scan(app) -> None:
                             )
                             db.session.add(_sra_opp)
                             db.session.flush()
+                            # SRA entry_price is swing-low based (historical).
+                            # ref_price = today's close so forward returns are comparable.
+                            _sra_ref = float(df["close"].iloc[-1])
                             _log_cmp(
                                 "SRA", sra.opp_type, _sra_opp.id,
-                                sra.entry_price, sra.fast_tp, sra.balanced_tp, s_sl,
+                                sra.entry_price, _sra_ref,   # ref != entry for SRA
+                                sra.fast_tp, sra.balanced_tp, s_sl,
                                 round(s_rr, 2) if s_rr else None, sra.balanced_max_bars,
                                 sra.score, sra.grade, snap,
                             )
