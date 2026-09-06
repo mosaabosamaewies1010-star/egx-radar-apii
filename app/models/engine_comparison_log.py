@@ -93,19 +93,31 @@ class EngineComparisonLog(db.Model):
     days_to_mfe = db.Column(db.Integer, nullable=True)
 
     # ── Common Evaluation Layer ────────────────────────────────────────────────
-    eval_tp_pct    = db.Column(db.Float, default=7.0)   # reference TP threshold used
-    eval_sl_pct    = db.Column(db.Float, default=5.0)   # reference SL threshold used (absolute)
+    # Thresholds recorded explicitly so future analysis always knows the rule used
+    eval_tp_pct    = db.Column(db.Float, default=7.0)   # TP threshold %
+    eval_sl_pct    = db.Column(db.Float, default=5.0)   # SL threshold % (stored positive)
     eval_hit_tp    = db.Column(db.Boolean, nullable=True)
     eval_hit_sl    = db.Column(db.Boolean, nullable=True)
     eval_status    = db.Column(db.String(20), nullable=True)  # TP|SL|EXPIRED|OPEN
-    eval_pnl_pct   = db.Column(db.Float, nullable=True)       # +7.0 / -5.0 / actual (EXPIRED)
+
+    # eval_exit_price — the price at which the evaluation rule concluded:
+    #   TP      → reference_price × 1.07   (the threshold the intraday high crossed)
+    #   SL      → reference_price × 0.95   (the threshold the intraday low crossed)
+    #   EXPIRED → close of the 10th trading session
+    eval_exit_price = db.Column(db.Float, nullable=True)
+
+    # eval_pnl_pct always derived as (eval_exit_price / reference_price - 1) × 100:
+    #   TP → exactly +7.0; SL → exactly -5.0; EXPIRED → actual close return
+    eval_pnl_pct   = db.Column(db.Float, nullable=True)
     eval_hold_days = db.Column(db.Integer, nullable=True)
     eval_exit_date = db.Column(db.Date, nullable=True)        # calendar date of exit
 
-    # ── Expiry mark-to-market (close of exit bar) ──────────────────────────────
-    # For TP/SL:    close of the day the threshold was first breached intraday
-    # For EXPIRED:  close of the 10th trading session
+    # ── Expiry mark-to-market (close of the exit session) ─────────────────────
+    # For TP/SL:   close of the session where the threshold was first breached
+    # For EXPIRED: close of the 10th trading session
     # expiry_pnl_pct = (expiry_close / reference_price - 1) × 100
+    # Differs from eval_pnl_pct for TP/SL — provides actual close return
+    # alongside the threshold-based eval_pnl_pct for richer analysis.
     expiry_close   = db.Column(db.Float, nullable=True)
     expiry_pnl_pct = db.Column(db.Float, nullable=True)
 
@@ -149,8 +161,11 @@ class EngineComparisonLog(db.Model):
             },
             "eval": {
                 "status":      self.eval_status,
+                "tp_pct":      self.eval_tp_pct,
+                "sl_pct":      self.eval_sl_pct,
                 "hit_tp":      self.eval_hit_tp,
                 "hit_sl":      self.eval_hit_sl,
+                "exit_price":  self.eval_exit_price,
                 "pnl_pct":     self.eval_pnl_pct,
                 "hold_days":   self.eval_hold_days,
                 "exit_date":   self.eval_exit_date.isoformat() if self.eval_exit_date else None,

@@ -134,46 +134,55 @@ def run_comparison_update_job(app) -> None:
                                     break
 
                             if hit_tp_day and (hit_sl_day is None or hit_tp_day <= hit_sl_day):
-                                # TP hit first (or same day — TP wins)
-                                row.eval_hit_tp    = True
-                                row.eval_hit_sl    = False
-                                row.eval_status    = "TP"
-                                row.eval_pnl_pct   = COMMON_TP_PCT
-                                row.eval_hold_days = hit_tp_day
-                                row.eval_exit_date = dates[hit_tp_day - 1].date()
-                                row.expiry_close   = round(float(closes[hit_tp_day - 1]), 4)
-                                row.expiry_pnl_pct = round(
+                                # TP hit first (or same day — TP wins).
+                                # eval_exit_price = tp_thresh (the intraday level crossed).
+                                # eval_pnl_pct    = (tp_thresh / ref - 1)*100 = exactly +TP%.
+                                # expiry_close    = actual close of that session (may differ).
+                                _tp_thresh = round(ref * (1 + COMMON_TP_PCT / 100), 4)
+                                row.eval_hit_tp     = True
+                                row.eval_hit_sl     = False
+                                row.eval_status     = "TP"
+                                row.eval_exit_price = _tp_thresh
+                                row.eval_pnl_pct    = round((_tp_thresh / ref - 1) * 100, 2)
+                                row.eval_hold_days  = hit_tp_day
+                                row.eval_exit_date  = dates[hit_tp_day - 1].date()
+                                row.expiry_close    = round(float(closes[hit_tp_day - 1]), 4)
+                                row.expiry_pnl_pct  = round(
                                     (closes[hit_tp_day - 1] / ref - 1) * 100, 2
                                 )
 
                             elif hit_sl_day and (hit_tp_day is None or hit_sl_day < hit_tp_day):
-                                # SL hit first
-                                row.eval_hit_tp    = False
-                                row.eval_hit_sl    = True
-                                row.eval_status    = "SL"
-                                row.eval_pnl_pct   = -COMMON_SL_PCT
-                                row.eval_hold_days = hit_sl_day
-                                row.eval_exit_date = dates[hit_sl_day - 1].date()
-                                row.expiry_close   = round(float(closes[hit_sl_day - 1]), 4)
-                                row.expiry_pnl_pct = round(
+                                # SL hit first.
+                                # eval_exit_price = sl_thresh (the intraday level crossed).
+                                _sl_thresh = round(ref * (1 - COMMON_SL_PCT / 100), 4)
+                                row.eval_hit_tp     = False
+                                row.eval_hit_sl     = True
+                                row.eval_status     = "SL"
+                                row.eval_exit_price = _sl_thresh
+                                row.eval_pnl_pct    = round((_sl_thresh / ref - 1) * 100, 2)
+                                row.eval_hold_days  = hit_sl_day
+                                row.eval_exit_date  = dates[hit_sl_day - 1].date()
+                                row.expiry_close    = round(float(closes[hit_sl_day - 1]), 4)
+                                row.expiry_pnl_pct  = round(
                                     (closes[hit_sl_day - 1] / ref - 1) * 100, 2
                                 )
 
                             elif len(closes) >= COMMON_MAX_HOLD:
-                                # Survived 10 sessions without hitting TP or SL
-                                row.eval_hit_tp    = False
-                                row.eval_hit_sl    = False
-                                row.eval_status    = "EXPIRED"
-                                row.eval_hold_days = COMMON_MAX_HOLD
-                                row.eval_exit_date = dates[COMMON_MAX_HOLD - 1].date()
-                                row.expiry_close   = round(float(closes[COMMON_MAX_HOLD - 1]), 4)
-                                row.expiry_pnl_pct = round(
-                                    (closes[COMMON_MAX_HOLD - 1] / ref - 1) * 100, 2
-                                )
-                                row.eval_pnl_pct   = row.expiry_pnl_pct
+                                # Survived 10 sessions without hitting TP or SL — EXPIRED.
+                                # eval_exit_price = close of session 10 (same as expiry_close).
+                                _expiry_close = round(float(closes[COMMON_MAX_HOLD - 1]), 4)
+                                row.eval_hit_tp     = False
+                                row.eval_hit_sl     = False
+                                row.eval_status     = "EXPIRED"
+                                row.eval_exit_price = _expiry_close
+                                row.eval_pnl_pct    = round((_expiry_close / ref - 1) * 100, 2)
+                                row.eval_hold_days  = COMMON_MAX_HOLD
+                                row.eval_exit_date  = dates[COMMON_MAX_HOLD - 1].date()
+                                row.expiry_close    = _expiry_close
+                                row.expiry_pnl_pct  = row.eval_pnl_pct  # identical for EXPIRED
 
                             else:
-                                # Still within hold window — check again tomorrow
+                                # Still within hold window — check again tomorrow.
                                 row.eval_status = "OPEN"
 
                             row.path_updated_at = datetime.now(timezone.utc)
