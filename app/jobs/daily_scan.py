@@ -155,13 +155,14 @@ def run_daily_scan(app) -> None:
 
             stocks = Stock.query.filter_by(is_active=True).all()
 
-            # ── Pre-fetch all OHLCV ────────────────────────────────────────────
-            # Used for: (1) per-stock fast df lookup in main loop
-            #           (2) breadth_pct calculation passed to Stage + Trend engines
-            # 3mo (~65 EGX bars) is sufficient for all engines and halves the
-            # peak memory vs 6mo — important on Render free-tier (512 MB).
+            # ── Pre-fetch all OHLCV (breadth only) ────────────────────────────
+            # "3mo" (~65 bars) is enough for EMA50 breadth calculation and keeps
+            # the batch fetch lightweight (prevents OOM on Render free-tier).
+            # After breadth is computed these DataFrames are released so the main
+            # loop can fetch each stock individually with "6mo" (needed for the
+            # full indicator suite without holding all DFs in memory at once).
             symbols = [s.symbol for s in stocks]
-            logger.info("daily_scan: pre-fetching %d tickers...", len(symbols))
+            logger.info("daily_scan: pre-fetching %d tickers (breadth pass)...", len(symbols))
             all_dfs = fetch_multiple(symbols, period="3mo")
 
             valid_dfs  = {sym: df for sym, df in all_dfs.items() if df is not None}
@@ -230,21 +231,24 @@ def run_daily_scan(app) -> None:
                         db.session.rollback()
                         logger.warning("daily_scan: regime insert race — another thread won, continuing")
 
+            # Release breadth DataFrames — no longer needed.
+            # Main loop fetches per-stock with 6mo for the full indicator suite.
+            all_dfs.clear()
+            valid_dfs.clear()
+
             # Legacy regime label for RadarScoreHistory (kept for score explanation text)
             regime_rec      = MarketRegimeHistory.query.order_by(MarketRegimeHistory.run_date.desc()).first()
             momentum_regime = regime_rec.regime if regime_rec else "SIDEWAYS"
 
             # ──────────────────────────────────────────────────────────────────
-            # Main scan loop
+            # Main scan loop — per-stock 6mo fetch (full indicator history)
             # ──────────────────────────────────────────────────────────────────
             success = skip = fail = 0
 
             for stock in stocks:
                 try:
-                    # ── OHLCV ─────────────────────────────────────────────────
-                    df = all_dfs.get(stock.symbol)
-                    if df is None:
-                        df = fetch_ohlcv(stock.symbol)
+                    # ── OHLCV (6mo — needed for full indicator suite) ──────────
+                    df = fetch_ohlcv(stock.symbol, period="6mo")
                     if df is None:
                         logger.warning("daily_scan: no data for %s", stock.symbol)
                         fail += 1
