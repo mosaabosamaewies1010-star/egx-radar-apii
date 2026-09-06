@@ -155,12 +155,12 @@ def run_daily_scan(app) -> None:
 
             stocks = Stock.query.filter_by(is_active=True).all()
 
-            # ── Pre-fetch all OHLCV (breadth only) ────────────────────────────
-            # "3mo" (~65 bars) is enough for EMA50 breadth calculation and keeps
-            # the batch fetch lightweight (prevents OOM on Render free-tier).
-            # After breadth is computed these DataFrames are released so the main
-            # loop can fetch each stock individually with "6mo" (needed for the
-            # full indicator suite without holding all DFs in memory at once).
+            # ── Pre-fetch all OHLCV (breadth + main loop) ─────────────────────
+            # "3mo" (~65 bars) is enough for EMA50 breadth AND the full indicator
+            # suite (compute_indicators needs ≥30 bars; MA50/200 fall back).
+            # DFs are kept alive through the main loop to avoid a second round of
+            # yfinance calls which rate-limits Render's IP (causing most "6mo"
+            # fetches to return empty). Cleared after main loop, before SRA pass.
             symbols = [s.symbol for s in stocks]
             logger.info("daily_scan: pre-fetching %d tickers (breadth pass)...", len(symbols))
             all_dfs = fetch_multiple(symbols, period="3mo")
@@ -231,9 +231,9 @@ def run_daily_scan(app) -> None:
                         db.session.rollback()
                         logger.warning("daily_scan: regime insert race — another thread won, continuing")
 
-            # Release breadth DataFrames — no longer needed.
-            # Main loop fetches per-stock with 6mo for the full indicator suite.
-            all_dfs.clear()
+            # Release valid_dfs (breadth subset) — no longer needed.
+            # all_dfs is kept so the main loop can reuse the same 3mo DFs
+            # without a second round of yfinance calls (which rate-limit Render).
             valid_dfs.clear()
 
             # Legacy regime label for RadarScoreHistory (kept for score explanation text)
@@ -241,14 +241,15 @@ def run_daily_scan(app) -> None:
             momentum_regime = regime_rec.regime if regime_rec else "SIDEWAYS"
 
             # ──────────────────────────────────────────────────────────────────
-            # Main scan loop — per-stock 6mo fetch (full indicator history)
+            # Main scan loop — reuse pre-fetched 3mo DFs (no second yfinance
+            # round-trip; avoids rate-limiting that broke the 6mo-per-stock path)
             # ──────────────────────────────────────────────────────────────────
             success = skip = fail = 0
 
             for stock in stocks:
                 try:
-                    # ── OHLCV (6mo — needed for full indicator suite) ──────────
-                    df = fetch_ohlcv(stock.symbol, period="6mo")
+                    # ── OHLCV (reuse pre-fetched 3mo DF) ──────────────────────
+                    df = all_dfs.get(stock.symbol)
                     if df is None:
                         logger.warning("daily_scan: no data for %s", stock.symbol)
                         fail += 1
