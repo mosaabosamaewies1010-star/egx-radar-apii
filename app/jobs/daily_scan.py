@@ -155,12 +155,14 @@ def run_daily_scan(app) -> None:
 
             stocks = Stock.query.filter_by(is_active=True).all()
 
-            # ── Pre-fetch all OHLCV (6 months) ────────────────────────────────
+            # ── Pre-fetch all OHLCV ────────────────────────────────────────────
             # Used for: (1) per-stock fast df lookup in main loop
             #           (2) breadth_pct calculation passed to Stage + Trend engines
+            # 3mo (~65 EGX bars) is sufficient for all engines and halves the
+            # peak memory vs 6mo — important on Render free-tier (512 MB).
             symbols = [s.symbol for s in stocks]
             logger.info("daily_scan: pre-fetching %d tickers...", len(symbols))
-            all_dfs = fetch_multiple(symbols, period="6mo")
+            all_dfs = fetch_multiple(symbols, period="3mo")
 
             valid_dfs  = {sym: df for sym, df in all_dfs.items() if df is not None}
             breadth_pct = 50.0
@@ -512,6 +514,11 @@ def run_daily_scan(app) -> None:
 
             logger.info("daily_scan: done — success=%d, skip=%d, fail=%d", success, skip, fail)
 
+            # Release the batch-fetched DataFrames — no longer needed.
+            # SRA fetches per-stock below so we keep at most 1 DF in memory
+            # at a time during the SRA pass (avoids holding 87 DFs at once).
+            all_dfs.clear()
+
             # ══════════════════════════════════════════════════════════════════
             # SRA ENGINE — Independent pass for Engine Comparison v1
             # Runs on ALL stocks regardless of Stage/Trend/Vol signals.
@@ -520,7 +527,7 @@ def run_daily_scan(app) -> None:
             if _SRA_AVAILABLE:
                 for stock in stocks:
                     try:
-                        df = all_dfs.get(stock.symbol)
+                        df = fetch_ohlcv(stock.symbol, period="3mo")
                         if df is None:
                             continue
                         existing_sra = Opportunity.query.filter(
