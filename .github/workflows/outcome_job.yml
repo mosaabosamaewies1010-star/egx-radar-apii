@@ -18,10 +18,19 @@ jobs:
     timeout-minutes: 15
 
     steps:
+      - name: Pre-warm server (avoid cold-start timeout)
+        run: |
+          # Free-tier Render can take 50-90s to wake up.
+          # A cheap health ping before the real call gives the server time to start.
+          # We ignore the result — if the server is already warm this is instant.
+          curl -s -o /dev/null --max-time 90 \
+            "${{ secrets.RENDER_API_URL }}/api/market/regime" || true
+          sleep 5
+
       - name: Run outcome_job (synchronous — HTTP 200 = job completed)
         run: |
           RESPONSE=$(curl -s -o response.json -w "%{http_code}" \
-            --max-time 110 \
+            --max-time 200 \
             -X POST "${{ secrets.RENDER_API_URL }}/api/admin/trigger-outcome" \
             -H "X-API-Key: ${{ secrets.BOT_API_KEY }}" \
             -H "Content-Type: application/json")
