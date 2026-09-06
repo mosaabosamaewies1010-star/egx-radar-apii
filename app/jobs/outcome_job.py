@@ -28,7 +28,9 @@ logger = logging.getLogger(__name__)
 # Safety guard: abort if v1.0 PENDING count unexpectedly exceeds this.
 # Protects against regression where the v1.0 filter is accidentally removed
 # or the population grows far beyond expected OOS size.
-MAX_EXPECTED_V1_PENDING = 50
+# Raised from 50→300: OOS is past 20 trading days; at ~5 signals/day and
+# MAX_HOLD=60 sessions the realistic peak is ~300. 50 was too tight.
+MAX_EXPECTED_V1_PENDING = 300
 
 
 def _fetch_last_close(symbol: str) -> float | None:
