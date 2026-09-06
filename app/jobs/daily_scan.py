@@ -96,6 +96,11 @@ def run_daily_scan(app) -> None:
                 """
                 if not _CMP_LOG_AVAILABLE:
                     return
+                # Use a SAVEPOINT so any DB-level error (table missing,
+                # IntegrityError on duplicate) is caught HERE without
+                # rolling back the outer transaction (RadarScoreHistory +
+                # opportunity stay safe and can still be committed).
+                sp = db.session.begin_nested()
                 try:
                     db.session.add(EngineComparisonLog(
                         setup_id        = EngineComparisonLog.build_setup_id(today, stock.symbol),
@@ -119,7 +124,9 @@ def run_daily_scan(app) -> None:
                         adx             = snap.get("adx"),
                         rsi             = snap.get("rsi"),
                     ))
+                    sp.commit()
                 except Exception:
+                    sp.rollback()
                     logger.warning("daily_scan: _log_cmp failed for %s", stock.symbol, exc_info=True)
 
             # Stage Breakout Engine (Primary ⭐⭐⭐⭐⭐) — PF 2.075
