@@ -265,19 +265,30 @@ WHERE eval_status = 'OPEN'
 
 UNION ALL
 
+-- CHECK 10 in SUMMARY: subquery required because SUM(COUNT(...)) is
+-- a nested aggregate which is invalid SQL in all dialects.
 SELECT 'CHECK_10_pipeline_missing' AS check_name,
-       COALESCE(SUM(COUNT(o.id) - COUNT(c.id)), 0)
-FROM opportunities o
-LEFT JOIN engine_comparison_logs c ON c.opportunity_id = o.id
-WHERE o.run_date >= CURRENT_DATE - 21
-  AND o.opp_type NOT LIKE 'MOMENTUM%'
-  AND o.strategy_version_id IS NOT NULL
-GROUP BY o.run_date,
-    CASE WHEN o.opp_type LIKE 'STAGE_%' THEN 'STAGE'
-         WHEN o.opp_type LIKE 'TREND_%' THEN 'TREND'
-         WHEN o.opp_type LIKE 'SRA_%'   THEN 'SRA'
-         WHEN o.opp_type = 'VOL_RADAR'  THEN 'VOL_RADAR'
-         ELSE 'OTHER' END
+       COALESCE((
+           SELECT SUM(missing)
+           FROM (
+               SELECT COUNT(o.id) - COUNT(c.id) AS missing
+               FROM opportunities o
+               LEFT JOIN engine_comparison_logs c
+                   ON c.opportunity_id = o.id
+               WHERE o.run_date >= CURRENT_DATE - 21
+                 AND o.opp_type NOT LIKE 'MOMENTUM%'
+                 AND o.strategy_version_id IS NOT NULL
+               GROUP BY o.run_date,
+                   CASE
+                       WHEN o.opp_type LIKE 'STAGE_%' THEN 'STAGE'
+                       WHEN o.opp_type LIKE 'TREND_%' THEN 'TREND'
+                       WHEN o.opp_type LIKE 'SRA_%'   THEN 'SRA'
+                       WHEN o.opp_type = 'VOL_RADAR'  THEN 'VOL_RADAR'
+                       ELSE 'OTHER'
+                   END
+               HAVING COUNT(o.id) > COUNT(c.id)
+           ) _missing
+       ), 0)
 
 ORDER BY check_name;
 -- ALL failing_rows should be 0 for a complete PASS.
