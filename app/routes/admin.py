@@ -1165,3 +1165,49 @@ def trend_monitor():
         "validation":   validation,
         "scan_logs":    scan_logs,
     })
+
+
+# ── Engine Comparison Logs export ─────────────────────────────────────────────
+
+@admin_bp.get("/api/admin/engine-comparison-logs")
+def get_engine_comparison_logs():
+    """
+    Return engine_comparison_logs rows for Engine Comparison v1 collection.
+    Protected by BOT_API_KEY.
+
+    Query params:
+      date    — YYYYMMDD  (required; returns one scan day)
+      engine  — STAGE | TREND | VOL_RADAR | SRA  (repeatable; omit = all 4)
+      limit   — max rows (default 500, max 2000)
+    """
+    err = _check_key()
+    if err:
+        return err
+
+    from app.models.engine_comparison_log import EngineComparisonLog
+    import datetime as dt_mod
+
+    date_str = request.args.get("date")
+    engines  = request.args.getlist("engine") or ["STAGE", "TREND", "VOL_RADAR", "SRA"]
+    try:
+        limit = min(int(request.args.get("limit", 500)), 2000)
+    except (ValueError, TypeError):
+        limit = 500
+
+    q = EngineComparisonLog.query.filter(
+        EngineComparisonLog.engine.in_(engines)
+    )
+
+    if date_str:
+        try:
+            d = dt_mod.date(int(date_str[:4]), int(date_str[4:6]), int(date_str[6:8]))
+            q = q.filter(EngineComparisonLog.signal_date == d)
+        except (ValueError, IndexError):
+            return jsonify({"error": f"invalid date: {date_str}"}), 400
+
+    rows = (
+        q.order_by(EngineComparisonLog.signal_date, EngineComparisonLog.symbol)
+        .limit(limit)
+        .all()
+    )
+    return jsonify({"count": len(rows), "rows": [r.to_dict() for r in rows]})
