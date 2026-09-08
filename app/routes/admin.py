@@ -1184,8 +1184,13 @@ def get_engine_comparison_logs():
     if err:
         return err
 
-    from app.models.engine_comparison_log import EngineComparisonLog
+    import traceback as _tb
     import datetime as dt_mod
+
+    try:
+        from app.models.engine_comparison_log import EngineComparisonLog
+    except Exception as _ie:
+        return jsonify({"error": "import_error", "detail": str(_ie)}), 500
 
     date_str = request.args.get("date")
     engines  = request.args.getlist("engine") or ["STAGE", "TREND", "VOL_RADAR", "SRA"]
@@ -1194,20 +1199,25 @@ def get_engine_comparison_logs():
     except (ValueError, TypeError):
         limit = 500
 
-    q = EngineComparisonLog.query.filter(
-        EngineComparisonLog.engine.in_(engines)
-    )
+    try:
+        q = EngineComparisonLog.query.filter(
+            EngineComparisonLog.engine.in_(engines)
+        )
 
-    if date_str:
-        try:
-            d = dt_mod.date(int(date_str[:4]), int(date_str[4:6]), int(date_str[6:8]))
-            q = q.filter(EngineComparisonLog.signal_date == d)
-        except (ValueError, IndexError):
-            return jsonify({"error": f"invalid date: {date_str}"}), 400
+        if date_str:
+            try:
+                d = dt_mod.date(int(date_str[:4]), int(date_str[4:6]), int(date_str[6:8]))
+                q = q.filter(EngineComparisonLog.signal_date == d)
+            except (ValueError, IndexError):
+                return jsonify({"error": f"invalid date: {date_str}"}), 400
 
-    rows = (
-        q.order_by(EngineComparisonLog.signal_date, EngineComparisonLog.symbol)
-        .limit(limit)
-        .all()
-    )
-    return jsonify({"count": len(rows), "rows": [r.to_dict() for r in rows]})
+        rows = (
+            q.order_by(EngineComparisonLog.signal_date, EngineComparisonLog.symbol)
+            .limit(limit)
+            .all()
+        )
+        return jsonify({"count": len(rows), "rows": [r.to_dict() for r in rows]})
+
+    except Exception as _qe:
+        return jsonify({"error": "query_error", "detail": str(_qe),
+                        "trace": _tb.format_exc()[-1500:]}), 500
