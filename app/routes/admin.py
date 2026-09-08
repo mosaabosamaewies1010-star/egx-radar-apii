@@ -140,7 +140,11 @@ def system_health():
     month_ago = today - timedelta(days=30)
 
     signals_today = Opportunity.query.filter_by(run_date=today).count()
-    open_trades   = Opportunity.query.filter_by(outcome="PENDING", is_active=True).count()
+    open_trades   = Opportunity.query.filter(
+        Opportunity.outcome == "PENDING",
+        Opportunity.is_active == True,
+        Opportunity.strategy_version_id.isnot(None),
+    ).count()
 
     sra_open = (
         Opportunity.query
@@ -148,6 +152,7 @@ def system_health():
             Opportunity.opp_type.like("SRA_%"),
             Opportunity.outcome == "PENDING",
             Opportunity.is_active == True,
+            Opportunity.strategy_version_id.isnot(None),
         ).all()
     )
 
@@ -167,6 +172,7 @@ def system_health():
         Opportunity.opp_type.like("TREND_%"),
         Opportunity.outcome == "PENDING",
         Opportunity.is_active == True,
+        Opportunity.strategy_version_id.isnot(None),
     ).count()
 
     grade_dist = {"A+": 0, "A": 0, "B": 0}
@@ -403,20 +409,23 @@ def health_detail():
     elif kind == "sra_open":
         rows = (Opportunity.query
                 .filter(Opportunity.opp_type.like("SRA_%"),
-                        Opportunity.outcome == "PENDING", Opportunity.is_active.is_(True))
+                        Opportunity.outcome == "PENDING", Opportunity.is_active.is_(True),
+                        Opportunity.strategy_version_id.isnot(None))
                 .order_by(Opportunity.radar_score.desc()).limit(limit).all())
         items = [_opp_row(o) for o in rows]
 
     elif kind == "trend_open":
         rows = (Opportunity.query
                 .filter(Opportunity.opp_type.like("TREND_%"),
-                        Opportunity.outcome == "PENDING", Opportunity.is_active.is_(True))
+                        Opportunity.outcome == "PENDING", Opportunity.is_active.is_(True),
+                        Opportunity.strategy_version_id.isnot(None))
                 .order_by(Opportunity.radar_score.desc()).limit(limit).all())
         items = [_opp_row(o) for o in rows]
 
     elif kind == "all_open":
         rows = (Opportunity.query
-                .filter(Opportunity.outcome == "PENDING", Opportunity.is_active.is_(True))
+                .filter(Opportunity.outcome == "PENDING", Opportunity.is_active.is_(True),
+                        Opportunity.strategy_version_id.isnot(None))
                 .order_by(Opportunity.radar_score.desc()).limit(limit).all())
         items = [_opp_row(o) for o in rows]
 
