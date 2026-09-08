@@ -54,11 +54,61 @@ def fetch_ohlcv(symbol: str, period: str = "3mo") -> Optional[pd.DataFrame]:
 
 
 def fetch_multiple(symbols: list[str], period: str = "3mo") -> dict[str, Optional[pd.DataFrame]]:
-    """Fetch OHLCV for a list of symbols. Returns {symbol: df | None}."""
-    result: dict[str, Optional[pd.DataFrame]] = {}
-    for sym in symbols:
-        result[sym] = fetch_ohlcv(sym, period=period)
-    return result
+    """
+    Fetch OHLCV for all symbols in one batched yfinance call.
+    Single API call avoids per-ticker rate-limiting on Render's shared IP.
+    Falls back to per-symbol calls if the batch fails or returns <50% coverage.
+    """
+    result: dict[str, Optional[pd.DataFrame]] = {s: None for s in symbols}
+    if not symbols:
+        return result
+
+    tickers = [egx_ticker(s) for s in symbols]
+    ticker_to_sym = {egx_ticker(s): s for s in symbols}
+
+    try:
+        raw = yf.download(
+            tickers, period=period, auto_adjust=True,
+            progress=False, group_by="ticker", threads=True,
+        )
+        if raw is None or raw.empty:
+            raise ValueError("batch returned empty")
+
+        for ticker, sym in ticker_to_sym.items():
+            try:
+                # group_by="ticker" → MultiIndex with ticker at level 0
+                if isinstance(raw.columns, pd.MultiIndex):
+                    if ticker not in raw.columns.get_level_values(0):
+                        continue
+                    df = raw[ticker].copy()
+                else:
+                    df = raw.copy()
+
+                df.columns = [c.lower() for c in df.columns]
+                df.index = pd.to_datetime(df.index)
+                df = df.dropna(subset=["close", "volume"])
+                if len(df) >= 20:
+                    result[sym] = df
+                else:
+                    logger.warning("Batch: insufficient rows for %s (%d)", ticker, len(df))
+            except Exception as _pe:
+                logger.warning("Batch: parse error for %s: %s", ticker, _pe)
+
+        success_n = sum(1 for v in result.values() if v is not None)
+        logger.info("fetch_multiple: batch → %d/%d symbols", success_n, len(symbols))
+
+        if success_n < len(symbols) * 0.5:
+            logger.warning("fetch_multiple: batch coverage low (%d/%d) — falling back per-symbol",
+                           success_n, len(symbols))
+            raise ValueError("low coverage")
+
+        return result
+
+    except Exception as _be:
+        logger.warning("fetch_multiple: batch failed (%s) — falling back per-symbol", _be)
+        for sym in symbols:
+            result[sym] = fetch_ohlcv(sym, period=period)
+        return result
 
 
 def fetch_fundamentals(symbol: str) -> dict:
