@@ -10,8 +10,15 @@ For each PENDING v1.0 opportunity it:
 
 Scope (Option A — 2026-08-27):
   Only processes strategy_version_id = v1.0.
-  291 pre-v1.0 legacy signals (strategy_version_id = NULL) are not touched.
-  Safety guard: aborts if v1.0 PENDING count exceeds MAX_EXPECTED_V1_PENDING.
+  Legacy signals (strategy_version_id = NULL) are not touched.
+
+Processing model (2026-09-08):
+  Signals are processed in batches of BATCH_SIZE to limit per-run memory.
+  All PENDING signals in the queue are evaluated in one job run — batching
+  is a memory strategy, not a per-day throughput limit.
+  CIRCUIT_BREAKER_LIMIT aborts the job only if PENDING count is absurdly
+  large (e.g., the v1.0 filter was accidentally removed). Normal OOS backlog
+  is never a reason to abort — just process it.
 
 Returns a summary dict — callers treat HTTP 200 as "job completed", not just "started".
 
@@ -25,12 +32,14 @@ from datetime import date, datetime, timezone as tz
 
 logger = logging.getLogger(__name__)
 
-# Safety guard: abort if v1.0 PENDING count unexpectedly exceeds this.
-# Protects against regression where the v1.0 filter is accidentally removed
-# or the population grows far beyond expected OOS size.
-# Raised from 50→300: OOS is past 20 trading days; at ~5 signals/day and
-# MAX_HOLD=60 sessions the realistic peak is ~300. 50 was too tight.
-MAX_EXPECTED_V1_PENDING = 300
+# True circuit breaker — trips only if something is catastrophically wrong,
+# e.g. the v1.0 filter was removed and all historical signals became PENDING.
+# Normal OOS backlog (even a months-long one) never reaches this.
+CIRCUIT_BREAKER_LIMIT = 2000
+
+# Per-batch DB load size. Controls memory footprint per iteration.
+# ORM objects + joinedload(stock) are loaded in chunks of this size.
+BATCH_SIZE = 100
 
 
 def _fetch_last_close(symbol: str) -> float | None:
@@ -89,31 +98,35 @@ def run_outcome_job(app) -> dict:
 
     Summary fields:
       started_at, finished_at, duration_seconds
-      pending_before, pending_after
-      scanned, closed, tp1, tp2, sl, timeout, skipped, errors
+      pending_before, pending_after, remaining
+      scanned, closed, tp1, tp2, sl, timeout
+      skipped_no_price, skipped_not_eligible, skipped, errors
       status: ok | ok_nothing_to_close | ok_with_errors |
               suspicious_zero_closed | aborted_safety_cap |
-              aborted_v1_not_found | error
+              aborted_v1_not_found | aborted_v1_ambiguous | error
     """
     started_at = datetime.now(tz.utc)
 
     summary: dict = {
-        "started_at":          started_at.isoformat(),
-        "finished_at":         None,
-        "duration_seconds":    0,
-        "strategy_version_id": None,
-        "pending_before":      None,
-        "pending_after":       None,
-        "pending_legacy":      None,
-        "scanned":             0,
-        "closed":              0,
-        "tp1":                 0,
-        "tp2":                 0,
-        "sl":                  0,
-        "timeout":             0,
-        "skipped":             0,
-        "errors":              0,
-        "status":              "running",
+        "started_at":            started_at.isoformat(),
+        "finished_at":           None,
+        "duration_seconds":      0,
+        "strategy_version_id":   None,
+        "pending_before":        None,
+        "pending_after":         None,
+        "remaining":             None,
+        "pending_legacy":        None,
+        "scanned":               0,
+        "closed":                0,
+        "tp1":                   0,
+        "tp2":                   0,
+        "sl":                    0,
+        "timeout":               0,
+        "skipped":               0,
+        "skipped_no_price":      0,
+        "skipped_not_eligible":  0,
+        "errors":                0,
+        "status":                "running",
     }
 
     with app.app_context():
@@ -121,6 +134,7 @@ def run_outcome_job(app) -> dict:
             from app import db
             from app.models.opportunity import Opportunity
             from app.models.strategy_version import StrategyVersion
+            from sqlalchemy.orm import joinedload
 
             # Resolve v1.0 ID at runtime.
             # Exactly 1 row expected — 0 = missing, 2+ = ambiguous (both abort).
@@ -150,110 +164,156 @@ def run_outcome_job(app) -> dict:
                     .count()
                 )
 
-                pending = (
+                # Count first — do NOT load ORM objects until we know the count is sane.
+                pending_count = (
                     Opportunity.query
                     .filter(
                         Opportunity.outcome == "PENDING",
                         Opportunity.strategy_version_id == v1_id,
                     )
-                    .all()
+                    .count()
                 )
+                summary["pending_before"] = pending_count
 
-                summary["pending_before"] = len(pending)
-                summary["scanned"]        = len(pending)
-
-                # Safety guard: unexpected population size
-                if len(pending) > MAX_EXPECTED_V1_PENDING:
+                # Circuit breaker — trips only on absurd counts (filter regression, etc.).
+                # A normal accumulated backlog is never a reason to abort.
+                if pending_count > CIRCUIT_BREAKER_LIMIT:
                     logger.error(
-                        "outcome_job: SAFETY GUARD — v1.0 PENDING count=%d exceeds cap=%d. "
-                        "Aborting to prevent unintended bulk processing.",
-                        len(pending), MAX_EXPECTED_V1_PENDING,
+                        "outcome_job: CIRCUIT BREAKER — v1.0 PENDING count=%d "
+                        "exceeds hard limit=%d. This indicates a filter regression, "
+                        "not a normal backlog. Aborting.",
+                        pending_count, CIRCUIT_BREAKER_LIMIT,
                     )
-                    summary["status"] = "aborted_safety_cap"
+                    summary["status"]  = "aborted_safety_cap"
+                    summary["scanned"] = 0
 
-                elif not pending:
+                elif pending_count == 0:
                     logger.info("outcome_job: no PENDING v1.0 opportunities")
-                    summary["status"]       = "ok_nothing_to_close"
+                    summary["status"]        = "ok_nothing_to_close"
                     summary["pending_after"] = 0
+                    summary["remaining"]     = 0
 
                 else:
+                    # Collect IDs only — one lightweight query, no ORM object inflation.
+                    pending_ids = [
+                        row[0]
+                        for row in (
+                            Opportunity.query
+                            .filter(
+                                Opportunity.outcome == "PENDING",
+                                Opportunity.strategy_version_id == v1_id,
+                            )
+                            .with_entities(Opportunity.id)
+                            .all()
+                        )
+                    ]
+                    summary["scanned"] = len(pending_ids)
                     today = date.today()
 
-                    overdue_count = sum(
-                        1 for opp in pending
-                        if opp.max_hold_days and (today - opp.run_date).days >= opp.max_hold_days
-                    )
-                    logger.info(
-                        "outcome_job: checking %d v1.0 PENDING | %d overdue (age >= max_hold_days)",
-                        len(pending), overdue_count,
-                    )
+                    tp1_c = tp2_c = sl_c = timeout_c = 0
+                    skipped_no_price = skipped_not_eligible = errors = closed = 0
 
-                    tp1_c = tp2_c = sl_c = timeout_c = skipped = errors = closed = 0
+                    # Process in BATCH_SIZE chunks to limit per-iteration memory.
+                    for batch_start in range(0, len(pending_ids), BATCH_SIZE):
+                        chunk_ids = pending_ids[batch_start: batch_start + BATCH_SIZE]
 
-                    for opp in pending:
-                        try:
-                            sym        = opp.stock.symbol if opp.stock else "?"
-                            last_price = _fetch_last_close(sym)
+                        # joinedload(stock) avoids N+1: one JOIN per batch instead of
+                        # one extra query per signal.
+                        batch = (
+                            Opportunity.query
+                            .filter(Opportunity.id.in_(chunk_ids))
+                            .options(joinedload(Opportunity.stock))
+                            .all()
+                        )
 
-                            if last_price is None:
-                                skipped += 1
-                                logger.debug("outcome_job: no price for %s — skipped", sym)
-                                continue
+                        logger.info(
+                            "outcome_job: batch %d-%d / %d",
+                            batch_start + 1,
+                            batch_start + len(batch),
+                            len(pending_ids),
+                        )
 
-                            result = _classify_exit(opp, last_price)
-                            if result is None:
-                                skipped += 1
-                                continue
-
-                            outcome, exit_reason, exit_price = result
-                            hold_days = max(0, (today - opp.run_date).days) if opp.run_date else None
-                            pnl_pct   = round(
-                                (exit_price - opp.entry_price) / opp.entry_price * 100, 2
-                            )
-
-                            opp.outcome     = outcome
-                            opp.exit_reason = exit_reason
-                            opp.exit_price  = exit_price
-                            opp.pnl_pct     = pnl_pct
-                            opp.hold_days   = hold_days
-                            opp.closed_at   = today
-                            opp.is_active   = False
-
-                            profile = _profile_used(opp, exit_reason)
-                            if profile and opp.feature_snapshot:
-                                snap = dict(opp.feature_snapshot)
-                                snap["profile_used"]   = profile
-                                snap["closed_pnl_pct"] = pnl_pct
-                                opp.feature_snapshot   = snap
-
-                            db.session.commit()
-
-                            closed += 1
-                            if exit_reason == "TP1":       tp1_c     += 1
-                            elif exit_reason == "TP2":     tp2_c     += 1
-                            elif exit_reason == "SL":      sl_c      += 1
-                            elif exit_reason == "timeout": timeout_c += 1
-
-                            logger.info(
-                                "outcome_job: %s → %s (%s%s pnl=%.2f%% hold=%sd)",
-                                sym, outcome, exit_reason,
-                                f" [{profile}]" if profile else "",
-                                pnl_pct, hold_days,
-                            )
-
-                        except Exception:
-                            db.session.rollback()
-                            errors += 1
+                        for opp in batch:
                             try:
-                                sym_label = opp.stock.symbol if opp.stock else "?"
-                            except Exception:
-                                sym_label = "?"
-                            logger.warning(
-                                "outcome_job: error processing %s", sym_label, exc_info=True
-                            )
+                                # Idempotency guard: re-check outcome in the loaded object.
+                                # Protects against a rerun where the ID collection snapshot
+                                # included a signal that was closed in a previous partial run.
+                                if opp.outcome != "PENDING":
+                                    skipped_not_eligible += 1
+                                    logger.warning(
+                                        "outcome_job: id=%s already %s — skipped (idempotency guard)",
+                                        opp.id, opp.outcome,
+                                    )
+                                    continue
 
-                    # Re-query after commits for accurate pending_after count
-                    summary["pending_after"] = (
+                                sym        = opp.stock.symbol if opp.stock else "?"
+                                last_price = _fetch_last_close(sym)
+
+                                if last_price is None:
+                                    skipped_no_price += 1
+                                    logger.debug(
+                                        "outcome_job: no price for %s — skipped", sym
+                                    )
+                                    continue
+
+                                result = _classify_exit(opp, last_price)
+                                if result is None:
+                                    skipped_not_eligible += 1
+                                    continue
+
+                                outcome, exit_reason, exit_price = result
+                                hold_days = (
+                                    max(0, (today - opp.run_date).days)
+                                    if opp.run_date else None
+                                )
+                                pnl_pct = round(
+                                    (exit_price - opp.entry_price) / opp.entry_price * 100, 2
+                                )
+
+                                opp.outcome     = outcome
+                                opp.exit_reason = exit_reason
+                                opp.exit_price  = exit_price
+                                opp.pnl_pct     = pnl_pct
+                                opp.hold_days   = hold_days
+                                opp.closed_at   = today
+                                opp.is_active   = False
+
+                                profile = _profile_used(opp, exit_reason)
+                                if profile and opp.feature_snapshot:
+                                    snap = dict(opp.feature_snapshot)
+                                    snap["profile_used"]   = profile
+                                    snap["closed_pnl_pct"] = pnl_pct
+                                    opp.feature_snapshot   = snap
+
+                                db.session.commit()
+
+                                closed += 1
+                                if exit_reason == "TP1":       tp1_c     += 1
+                                elif exit_reason == "TP2":     tp2_c     += 1
+                                elif exit_reason == "SL":      sl_c      += 1
+                                elif exit_reason == "timeout": timeout_c += 1
+
+                                logger.info(
+                                    "outcome_job: %s → %s (%s%s pnl=%.2f%% hold=%sd)",
+                                    sym, outcome, exit_reason,
+                                    f" [{profile}]" if profile else "",
+                                    pnl_pct, hold_days,
+                                )
+
+                            except Exception:
+                                db.session.rollback()
+                                errors += 1
+                                try:
+                                    sym_label = opp.stock.symbol if opp.stock else "?"
+                                except Exception:
+                                    sym_label = "?"
+                                logger.warning(
+                                    "outcome_job: error processing %s", sym_label,
+                                    exc_info=True,
+                                )
+
+                    # Re-query for accurate final count.
+                    pending_after = (
                         Opportunity.query
                         .filter(
                             Opportunity.outcome == "PENDING",
@@ -262,38 +322,47 @@ def run_outcome_job(app) -> dict:
                         .count()
                     )
 
+                    skipped_total = skipped_no_price + skipped_not_eligible
+                    overdue_count = pending_count - skipped_not_eligible - closed - errors
+
                     summary.update({
-                        "closed":  closed,
-                        "tp1":     tp1_c,
-                        "tp2":     tp2_c,
-                        "sl":      sl_c,
-                        "timeout": timeout_c,
-                        "skipped": skipped,
-                        "errors":  errors,
+                        "pending_after":        pending_after,
+                        "remaining":            pending_after,
+                        "closed":               closed,
+                        "tp1":                  tp1_c,
+                        "tp2":                  tp2_c,
+                        "sl":                   sl_c,
+                        "timeout":              timeout_c,
+                        "skipped":              skipped_total,
+                        "skipped_no_price":     skipped_no_price,
+                        "skipped_not_eligible": skipped_not_eligible,
+                        "errors":               errors,
                     })
 
-                    if overdue_count > 0 and closed == 0 and errors == 0:
+                    logger.info(
+                        "outcome_job: DONE scanned=%d closed=%d "
+                        "(tp1=%d tp2=%d sl=%d timeout=%d) "
+                        "skipped_no_price=%d skipped_not_eligible=%d errors=%d "
+                        "pending_before=%d pending_after=%d",
+                        len(pending_ids), closed,
+                        tp1_c, tp2_c, sl_c, timeout_c,
+                        skipped_no_price, skipped_not_eligible, errors,
+                        pending_count, pending_after,
+                    )
+
+                    if skipped_not_eligible > 0 and closed == 0 and errors == 0 \
+                            and skipped_no_price == 0:
                         logger.warning(
-                            "outcome_job: SUSPICIOUS — %d overdue but 0 closed, 0 errors. "
+                            "outcome_job: SUSPICIOUS — scanned %d but 0 closed, "
+                            "0 errors, 0 price failures. All %d skipped as not_eligible. "
                             "Requires investigation.",
-                            overdue_count,
+                            len(pending_ids), skipped_not_eligible,
                         )
                         summary["status"] = "suspicious_zero_closed"
                     elif errors > 0:
                         summary["status"] = "ok_with_errors"
                     else:
                         summary["status"] = "ok"
-
-                    logger.info(
-                        "outcome_job: DONE scanned=%d closed=%d "
-                        "(tp1=%d tp2=%d sl=%d timeout=%d) skipped=%d errors=%d "
-                        "pending_before=%d pending_after=%d status=%s",
-                        len(pending), closed,
-                        tp1_c, tp2_c, sl_c, timeout_c,
-                        skipped, errors,
-                        summary["pending_before"], summary["pending_after"],
-                        summary["status"],
-                    )
 
         except Exception as _top_exc:
             logger.exception("outcome_job: top-level error")

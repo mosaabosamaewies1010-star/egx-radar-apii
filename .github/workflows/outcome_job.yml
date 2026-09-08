@@ -59,6 +59,9 @@ jobs:
               print(f"  SL:                {r.get('sl', 0)}")
               print(f"  timeout:           {r.get('timeout', 0)}")
               print(f"skipped:             {r.get('skipped', 0)}")
+              print(f"  no_price:          {r.get('skipped_no_price', 0)}")
+              print(f"  not_eligible:      {r.get('skipped_not_eligible', 0)}")
+              print(f"remaining:           {r.get('remaining', '?')}")
               print(f"errors:              {r.get('errors', 0)}")
               print(f"duration:            {r.get('duration_seconds', '?')}s")
 
