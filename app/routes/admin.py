@@ -1167,6 +1167,70 @@ def trend_monitor():
     })
 
 
+# ── Engine Comparison Logs migration ─────────────────────────────────────────
+
+@admin_bp.post("/api/admin/migrate-engine-comparison-logs")
+def migrate_engine_comparison_logs():
+    """
+    Idempotent migration: adds any missing columns to engine_comparison_logs.
+    Safe to run multiple times (uses IF NOT EXISTS).
+    Protected by BOT_API_KEY.
+    """
+    err = _check_key()
+    if err:
+        return err
+
+    from sqlalchemy import text
+
+    # All columns added after the initial table creation (IF NOT EXISTS = safe to re-run)
+    migrations = [
+        "ALTER TABLE engine_comparison_logs ADD COLUMN IF NOT EXISTS reference_price FLOAT",
+        "ALTER TABLE engine_comparison_logs ADD COLUMN IF NOT EXISTS score FLOAT",
+        "ALTER TABLE engine_comparison_logs ADD COLUMN IF NOT EXISTS grade VARCHAR(10)",
+        "ALTER TABLE engine_comparison_logs ADD COLUMN IF NOT EXISTS regime VARCHAR(20)",
+        "ALTER TABLE engine_comparison_logs ADD COLUMN IF NOT EXISTS breadth_pct FLOAT",
+        "ALTER TABLE engine_comparison_logs ADD COLUMN IF NOT EXISTS rvol FLOAT",
+        "ALTER TABLE engine_comparison_logs ADD COLUMN IF NOT EXISTS adx FLOAT",
+        "ALTER TABLE engine_comparison_logs ADD COLUMN IF NOT EXISTS rsi FLOAT",
+        "ALTER TABLE engine_comparison_logs ADD COLUMN IF NOT EXISTS fwd_1d_pct FLOAT",
+        "ALTER TABLE engine_comparison_logs ADD COLUMN IF NOT EXISTS fwd_3d_pct FLOAT",
+        "ALTER TABLE engine_comparison_logs ADD COLUMN IF NOT EXISTS fwd_5d_pct FLOAT",
+        "ALTER TABLE engine_comparison_logs ADD COLUMN IF NOT EXISTS fwd_10d_pct FLOAT",
+        "ALTER TABLE engine_comparison_logs ADD COLUMN IF NOT EXISTS mfe_pct FLOAT",
+        "ALTER TABLE engine_comparison_logs ADD COLUMN IF NOT EXISTS mae_pct FLOAT",
+        "ALTER TABLE engine_comparison_logs ADD COLUMN IF NOT EXISTS days_to_mfe INTEGER",
+        "ALTER TABLE engine_comparison_logs ADD COLUMN IF NOT EXISTS eval_tp_pct FLOAT DEFAULT 7.0",
+        "ALTER TABLE engine_comparison_logs ADD COLUMN IF NOT EXISTS eval_sl_pct FLOAT DEFAULT 5.0",
+        "ALTER TABLE engine_comparison_logs ADD COLUMN IF NOT EXISTS eval_hit_tp BOOLEAN",
+        "ALTER TABLE engine_comparison_logs ADD COLUMN IF NOT EXISTS eval_hit_sl BOOLEAN",
+        "ALTER TABLE engine_comparison_logs ADD COLUMN IF NOT EXISTS eval_status VARCHAR(20)",
+        "ALTER TABLE engine_comparison_logs ADD COLUMN IF NOT EXISTS eval_exit_price FLOAT",
+        "ALTER TABLE engine_comparison_logs ADD COLUMN IF NOT EXISTS eval_pnl_pct FLOAT",
+        "ALTER TABLE engine_comparison_logs ADD COLUMN IF NOT EXISTS eval_hold_days INTEGER",
+        "ALTER TABLE engine_comparison_logs ADD COLUMN IF NOT EXISTS eval_exit_date DATE",
+        "ALTER TABLE engine_comparison_logs ADD COLUMN IF NOT EXISTS expiry_close FLOAT",
+        "ALTER TABLE engine_comparison_logs ADD COLUMN IF NOT EXISTS expiry_pnl_pct FLOAT",
+        "ALTER TABLE engine_comparison_logs ADD COLUMN IF NOT EXISTS path_updated_at TIMESTAMP",
+    ]
+
+    results = []
+    try:
+        with db.engine.connect() as conn:
+            for sql in migrations:
+                col = sql.split("IF NOT EXISTS")[1].strip().split()[0]
+                try:
+                    conn.execute(text(sql))
+                    conn.commit()
+                    results.append({"column": col, "status": "ok"})
+                except Exception as e:
+                    conn.rollback()
+                    results.append({"column": col, "status": "error", "detail": str(e)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify({"ok": True, "migrations": results})
+
+
 # ── Engine Comparison Logs export ─────────────────────────────────────────────
 
 @admin_bp.get("/api/admin/engine-comparison-logs")
