@@ -260,12 +260,13 @@ def run_daily_scan(app) -> None:
             # Main scan loop — reuse pre-fetched 3mo DFs (no second yfinance
             # round-trip; avoids rate-limiting that broke the 6mo-per-stock path)
             # ──────────────────────────────────────────────────────────────────
+            import gc as _gc
             success = skip = fail = 0
 
-            for stock in stocks:
+            for _stock_idx, stock in enumerate(stocks):
                 try:
-                    # ── OHLCV (reuse pre-fetched 3mo DF) ──────────────────────
-                    df = all_dfs.get(stock.symbol)
+                    # ── OHLCV (reuse pre-fetched 3mo DF, then free it) ─────────
+                    df = all_dfs.pop(stock.symbol, None)
                     if df is None:
                         logger.warning("daily_scan: no data for %s", stock.symbol)
                         fail += 1
@@ -533,12 +534,14 @@ def run_daily_scan(app) -> None:
                     logger.warning("daily_scan: error for %s", stock.symbol, exc_info=True)
                     fail += 1
 
+                if _stock_idx % 50 == 49:
+                    _gc.collect()
+
             logger.info("daily_scan: done — success=%d, skip=%d, fail=%d", success, skip, fail)
 
-            # Release the batch-fetched DataFrames — no longer needed.
-            # SRA fetches per-stock below so we keep at most 1 DF in memory
-            # at a time during the SRA pass (avoids holding 87 DFs at once).
+            # all_dfs already emptied by .pop() in the loop above; clear() is a no-op but kept for safety.
             all_dfs.clear()
+            _gc.collect()
 
             # ══════════════════════════════════════════════════════════════════
             # SRA ENGINE — Independent pass for Engine Comparison v1

@@ -53,62 +53,78 @@ def fetch_ohlcv(symbol: str, period: str = "3mo") -> Optional[pd.DataFrame]:
         return None
 
 
+_FETCH_CHUNK_SIZE = 60  # تقليل peak memory: 60 سهم في كل chunk بدل 256 دفعة واحدة
+
+
 def fetch_multiple(symbols: list[str], period: str = "3mo") -> dict[str, Optional[pd.DataFrame]]:
     """
-    Fetch OHLCV for all symbols in one batched yfinance call.
-    Single API call avoids per-ticker rate-limiting on Render's shared IP.
-    Falls back to per-symbol calls if the batch fails or returns <50% coverage.
+    Fetch OHLCV for all symbols in chunked batches to stay within Render 512MB RAM.
+    Each chunk of 60 tickers is downloaded, extracted, then the raw DataFrame is deleted
+    before moving to the next chunk — avoids a single 256-ticker spike.
+    threads=False: sequential within each chunk → lower peak memory vs parallel threads.
+    Falls back to per-symbol fetch if a chunk fails.
     """
+    import gc
+
     result: dict[str, Optional[pd.DataFrame]] = {s: None for s in symbols}
     if not symbols:
         return result
 
-    tickers = [egx_ticker(s) for s in symbols]
-    ticker_to_sym = {egx_ticker(s): s for s in symbols}
+    for chunk_start in range(0, len(symbols), _FETCH_CHUNK_SIZE):
+        chunk_syms    = symbols[chunk_start : chunk_start + _FETCH_CHUNK_SIZE]
+        tickers       = [egx_ticker(s) for s in chunk_syms]
+        ticker_to_sym = {egx_ticker(s): s for s in chunk_syms}
+        raw           = None
 
-    try:
-        raw = yf.download(
-            tickers, period=period, auto_adjust=True,
-            progress=False, group_by="ticker", threads=True,
-        )
-        if raw is None or raw.empty:
-            raise ValueError("batch returned empty")
+        try:
+            raw = yf.download(
+                tickers, period=period, auto_adjust=True,
+                progress=False, group_by="ticker", threads=False,
+            )
+            if raw is None or raw.empty:
+                raise ValueError("chunk returned empty")
 
-        for ticker, sym in ticker_to_sym.items():
-            try:
-                # group_by="ticker" → MultiIndex with ticker at level 0
-                if isinstance(raw.columns, pd.MultiIndex):
-                    if ticker not in raw.columns.get_level_values(0):
-                        continue
-                    df = raw[ticker].copy()
-                else:
-                    df = raw.copy()
+            for ticker, sym in ticker_to_sym.items():
+                try:
+                    if isinstance(raw.columns, pd.MultiIndex):
+                        if ticker not in raw.columns.get_level_values(0):
+                            continue
+                        df = raw[ticker].copy()
+                    else:
+                        df = raw.copy()
 
-                df.columns = [c.lower() for c in df.columns]
-                df.index = pd.to_datetime(df.index)
-                df = df.dropna(subset=["close", "volume"])
-                if len(df) >= 20:
-                    result[sym] = df
-                else:
-                    logger.warning("Batch: insufficient rows for %s (%d)", ticker, len(df))
-            except Exception as _pe:
-                logger.warning("Batch: parse error for %s: %s", ticker, _pe)
+                    df.columns = [c.lower() for c in df.columns]
+                    df.index   = pd.to_datetime(df.index)
+                    df         = df.dropna(subset=["close", "volume"])
+                    if len(df) >= 20:
+                        result[sym] = df
+                    else:
+                        logger.warning("Batch: insufficient rows for %s (%d)", ticker, len(df))
+                except Exception as _pe:
+                    logger.warning("Batch: parse error for %s: %s", ticker, _pe)
 
-        success_n = sum(1 for v in result.values() if v is not None)
-        logger.info("fetch_multiple: batch → %d/%d symbols", success_n, len(symbols))
+            chunk_ok = sum(1 for s in chunk_syms if result[s] is not None)
+            logger.info(
+                "fetch_multiple: chunk %d-%d → %d/%d ok",
+                chunk_start, chunk_start + len(chunk_syms) - 1,
+                chunk_ok, len(chunk_syms),
+            )
 
-        if success_n < len(symbols) * 0.5:
-            logger.warning("fetch_multiple: batch coverage low (%d/%d) — falling back per-symbol",
-                           success_n, len(symbols))
-            raise ValueError("low coverage")
+        except Exception as _be:
+            logger.warning(
+                "fetch_multiple: chunk %d-%d failed (%s) — falling back per-symbol",
+                chunk_start, chunk_start + len(chunk_syms) - 1, _be,
+            )
+            for sym in chunk_syms:
+                result[sym] = fetch_ohlcv(sym, period=period)
 
-        return result
+        finally:
+            del raw
+            gc.collect()
 
-    except Exception as _be:
-        logger.warning("fetch_multiple: batch failed (%s) — falling back per-symbol", _be)
-        for sym in symbols:
-            result[sym] = fetch_ohlcv(sym, period=period)
-        return result
+    success_n = sum(1 for v in result.values() if v is not None)
+    logger.info("fetch_multiple: total → %d/%d symbols", success_n, len(symbols))
+    return result
 
 
 def fetch_fundamentals(symbol: str) -> dict:
