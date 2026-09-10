@@ -43,6 +43,22 @@ def run_daily_scan(app) -> None:
 
             today = date.today()
 
+            # Auto-reset stale "running" rows from previous days (happens when Render kills the process mid-scan)
+            try:
+                stale = ScanLog.query.filter(
+                    ScanLog.status == "running",
+                    ScanLog.run_date < today,
+                ).all()
+                for s in stale:
+                    s.status = "failed"
+                    s.error_message = "Auto-reset: process was killed mid-run (OOM or Render timeout)"
+                if stale:
+                    db.session.commit()
+                    logger.info("daily_scan: reset %d stale running scan(s) to failed", len(stale))
+            except Exception as _re:
+                db.session.rollback()
+                logger.warning("daily_scan: stale-scan reset failed: %s", _re)
+
             # Look up current strategy version (v1.0) — used to tag every new signal
             v1 = StrategyVersion.query.filter_by(version="v1.0").first()
             v1_id = v1.id if v1 else None
