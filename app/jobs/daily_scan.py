@@ -651,7 +651,7 @@ def run_daily_scan(app) -> None:
 
             if scan_log is not None:
                 scan_log.stocks_scanned   = success + skip + fail
-                scan_log.sra_signals      = stage_count + trend_count + vol_radar_count
+                scan_log.sra_signals      = sra_new
                 scan_log.momentum_signals = stage_count
                 scan_log.kb_size          = 0
                 scan_log.regime           = sra_regime

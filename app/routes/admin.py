@@ -672,6 +672,19 @@ def trigger_scan():
     if err:
         return err
 
+    from app.models.scan_log import ScanLog
+
+    today = date.today()
+    existing = ScanLog.query.filter(
+        ScanLog.run_date == today,
+        ScanLog.status.in_(["running", "success", "partial"]),
+    ).first()
+    if existing:
+        return jsonify({
+            "ok":     False,
+            "message": f"scan already exists for today (id={existing.id}, status={existing.status})",
+        }), 200
+
     import threading
     from flask import current_app
 
