@@ -20,8 +20,87 @@ Old Momentum engine no longer generates new Opportunity records.
 """
 import logging
 from datetime import date, datetime, timedelta, timezone
+from typing import Optional
+
+import pytz
 
 logger = logging.getLogger(__name__)
+
+# ── Freshness Gate ────────────────────────────────────────────────────────────
+# EGX trades Sun–Thu (Python weekdays 0=Mon,1=Tue,2=Wed,3=Thu,6=Sun).
+# Scan runs ~15:30 Cairo. Gate blocks the scan if ANY valid DF is stale.
+# Conservative: one stale DF = full scan blocked. No majority logic.
+_EGX_TRADING_WEEKDAYS = {0, 1, 2, 3, 6}
+_CAIRO_TZ = pytz.timezone("Africa/Cairo")
+_SCAN_START_HOUR = 15
+
+
+class FreshnessError(RuntimeError):
+    """Raised when yfinance data is stale — scan is blocked, no fallback."""
+
+
+def _expected_session_date(now_cairo=None) -> date:
+    if now_cairo is None:
+        now_cairo = datetime.now(_CAIRO_TZ)
+    today = now_cairo.date()
+    weekday = today.weekday()
+    if weekday in _EGX_TRADING_WEEKDAYS and now_cairo.hour >= _SCAN_START_HOUR:
+        return today
+    check = today - timedelta(days=1) if weekday in _EGX_TRADING_WEEKDAYS else today
+    for _ in range(7):
+        if check.weekday() in _EGX_TRADING_WEEKDAYS:
+            return check
+        check -= timedelta(days=1)
+    return today
+
+
+def _assert_data_fresh(all_dfs: dict) -> None:
+    """
+    Conservative freshness check: every valid DF must have its last bar
+    at expected_session_date. One stale DF blocks the entire scan.
+    DFs that are None/empty (legitimately unavailable) are skipped.
+    """
+    import pandas as pd
+
+    exp = _expected_session_date()
+    stale: list[tuple[str, date]] = []
+    fresh_count = 0
+
+    for sym, df in all_dfs.items():
+        if df is None or df.empty:
+            continue  # delisted / unavailable — skip
+        try:
+            last = df.index[-1]
+            d = last.date() if hasattr(last, "date") else pd.Timestamp(last).date()
+        except Exception:
+            continue
+        if d < exp:
+            stale.append((sym, d))
+        else:
+            fresh_count += 1
+
+    total_valid = fresh_count + len(stale)
+    logger.info(
+        "freshness_gate: expected_session=%s | valid_dfs=%d | fresh=%d | stale=%d",
+        exp, total_valid, fresh_count, len(stale),
+    )
+
+    if total_valid == 0:
+        raise FreshnessError(
+            f"freshness_gate: NO DATA | expected_session={exp} | scan=blocked"
+        )
+
+    if stale:
+        detail = ", ".join(f"{s}@{d}" for s, d in stale[:5])
+        if len(stale) > 5:
+            detail += f" ... (+{len(stale) - 5} more)"
+        raise FreshnessError(
+            f"freshness_gate: STALE | expected_session={exp} | "
+            f"stale={len(stale)}/{total_valid} | {detail} | scan=blocked"
+        )
+
+    logger.info("freshness_gate: PASS | session=%s | %d/%d DFs fresh", exp, fresh_count, total_valid)
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 def run_daily_scan(app) -> None:
@@ -180,6 +259,7 @@ def run_daily_scan(app) -> None:
             symbols = [s.symbol for s in stocks]
             logger.info("daily_scan: pre-fetching %d tickers (breadth pass)...", len(symbols))
             all_dfs = fetch_multiple(symbols, period="3mo")
+            _assert_data_fresh(all_dfs)
 
             valid_dfs  = {sym: df for sym, df in all_dfs.items() if df is not None}
             breadth_pct = 50.0

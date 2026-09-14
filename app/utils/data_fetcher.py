@@ -29,7 +29,7 @@ def fetch_ohlcv(symbol: str, period: str = "3mo") -> Optional[pd.DataFrame]:
     """
     ticker = egx_ticker(symbol)
     try:
-        df = yf.download(ticker, period=period, auto_adjust=True, progress=False)
+        df = yf.download(ticker, period=period, auto_adjust=False, progress=False)
         if df is None or df.empty:
             logger.warning("No data for %s", ticker)
             return None
@@ -78,7 +78,7 @@ def fetch_multiple(symbols: list[str], period: str = "3mo") -> dict[str, Optiona
 
         try:
             raw = yf.download(
-                tickers, period=period, auto_adjust=True,
+                tickers, period=period, auto_adjust=False,
                 progress=False, group_by="ticker", threads=False,
             )
             if raw is None or raw.empty:
