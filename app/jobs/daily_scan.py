@@ -268,7 +268,6 @@ def run_daily_scan(app) -> None:
                 raise RuntimeError(f"SCAN BLOCKED — stale ThndrX data: {fresh_msg}")
 
             all_dfs = fetch_thndrx_multiple(symbols)
-            _assert_data_fresh(all_dfs)
 
             valid_dfs  = {sym: df for sym, df in all_dfs.items() if df is not None}
             breadth_pct = 50.0
