@@ -159,7 +159,10 @@ def run_daily_scan(app) -> None:
             from app.services.radar_score import compute_radar_score
             from app.services.explain import generate_explain
             from app.utils.data_fetcher import (
-                fetch_ohlcv, fetch_multiple, fetch_fundamentals, compute_adt, assess_data_quality,
+                fetch_fundamentals, compute_adt, assess_data_quality,
+            )
+            from app.utils.thndrx_fetcher import (
+                check_thndrx_freshness, fetch_thndrx_multiple, fetch_thndrx_ohlcv,
             )
 
             # Breadth calculation + SRA Engine (Engine Comparison pass)
@@ -258,7 +261,13 @@ def run_daily_scan(app) -> None:
             # fetches to return empty). Cleared after main loop, before SRA pass.
             symbols = [s.symbol for s in stocks]
             logger.info("daily_scan: pre-fetching %d tickers (breadth pass)...", len(symbols))
-            all_dfs = fetch_multiple(symbols, period="3mo")
+
+            fresh, fresh_msg = check_thndrx_freshness()
+            logger.info("daily_scan: thndrx freshness — %s", fresh_msg)
+            if not fresh:
+                raise RuntimeError(f"SCAN BLOCKED — stale ThndrX data: {fresh_msg}")
+
+            all_dfs = fetch_thndrx_multiple(symbols)
             _assert_data_fresh(all_dfs)
 
             valid_dfs  = {sym: df for sym, df in all_dfs.items() if df is not None}
@@ -631,7 +640,7 @@ def run_daily_scan(app) -> None:
             if _SRA_AVAILABLE:
                 for stock in stocks:
                     try:
-                        df = fetch_ohlcv(stock.symbol, period="3mo")
+                        df = fetch_thndrx_ohlcv(stock.symbol)
                         if df is None:
                             continue
                         existing_sra = Opportunity.query.filter(
