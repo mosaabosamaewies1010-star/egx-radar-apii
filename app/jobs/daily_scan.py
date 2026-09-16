@@ -382,7 +382,7 @@ def run_daily_scan(app) -> None:
                     # ── Fundamentals (weekly cap) ──────────────────────────────
                     stale = (
                         stock.fundamentals_updated_at is None
-                        or stock.fundamentals_updated_at < datetime.now(timezone.utc) - timedelta(days=6)
+                        or stock.fundamentals_updated_at < datetime.now() - timedelta(days=6)
                     )
                     if stale and fundamentals_fetched_this_run >= MAX_FUNDAMENTALS_PER_RUN:
                         stale = False
@@ -490,7 +490,7 @@ def run_daily_scan(app) -> None:
                                 sl_price             = s_sl,
                                 rr_ratio             = round(s_rr1, 2) if s_rr1 else None,
                                 max_hold_days        = stage.balanced_max_bars,
-                                radar_score          = stage.stage_score,
+                                radar_score          = float(stage.stage_score),
                                 signal_quality       = "HIGH" if stage.strength == "STRONG" else "MEDIUM",
                                 outcome              = "PENDING",
                                 feature_snapshot     = stage_snap,
@@ -550,7 +550,7 @@ def run_daily_scan(app) -> None:
                                 sl_price             = t_sl,
                                 rr_ratio             = round(t_rr1, 2) if t_rr1 else None,
                                 max_hold_days        = trend.balanced_max_bars,
-                                radar_score          = trend.trend_strength,
+                                radar_score          = float(trend.trend_strength),
                                 signal_quality       = "HIGH" if trend.grade == "A+" else "MEDIUM",
                                 outcome              = "PENDING",
                                 feature_snapshot     = trend_snap,
@@ -596,7 +596,7 @@ def run_daily_scan(app) -> None:
                                 sl_price             = None,
                                 rr_ratio             = None,
                                 max_hold_days        = 60,
-                                radar_score          = vol.vol_rvol * 10,
+                                radar_score          = float(vol.vol_rvol * 10),
                                 signal_quality       = "LOW",
                                 outcome              = "PENDING",
                                 feature_snapshot     = vol_snap,
@@ -676,7 +676,7 @@ def run_daily_scan(app) -> None:
                                 sl_price            = s_sl,
                                 rr_ratio            = round(s_rr, 2) if s_rr else None,
                                 max_hold_days       = sra.balanced_max_bars,
-                                radar_score         = sra.score,
+                                radar_score         = float(sra.score),
                                 signal_quality      = "HIGH" if sra.grade == "A+" else "MEDIUM",
                                 outcome             = "PENDING",
                                 feature_snapshot    = snap,
