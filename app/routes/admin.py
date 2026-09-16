@@ -381,6 +381,7 @@ def health_detail():
             "tp1":            o.tp1_price,
             "sl":             o.sl_price,
             "rr":             o.rr_ratio,
+            "last_price":     round(float(st.last_price), 2) if st and st.last_price else None,
             "run_date":       o.run_date.isoformat()  if o.run_date  else None,
             "closed_at":      o.closed_at.isoformat() if o.closed_at else None,
             # new
