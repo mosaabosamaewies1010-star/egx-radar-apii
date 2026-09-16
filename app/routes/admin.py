@@ -657,8 +657,12 @@ def trigger_outcome():
     from flask import current_app
     from app.jobs.outcome_job import run_outcome_job
 
-    app    = current_app._get_current_object()
-    result = run_outcome_job(app)
+    app = current_app._get_current_object()
+    try:
+        result = run_outcome_job(app)
+    except Exception as exc:
+        logger.exception("trigger_outcome: unhandled error")
+        return jsonify({"ok": False, "error": str(exc), "result": {"status": "error"}}), 500
 
     return jsonify({"ok": True, "result": result}), 200
 

@@ -31,11 +31,20 @@ jobs:
 
       - name: Run outcome_job (synchronous — HTTP 200 = job completed)
         run: |
-          RESPONSE=$(curl -s -o response.json -w "%{http_code}" \
-            --max-time 200 \
-            -X POST "${{ secrets.RENDER_API_URL }}/api/admin/trigger-outcome" \
-            -H "X-API-Key: ${{ secrets.BOT_API_KEY }}" \
-            -H "Content-Type: application/json")
+          # Retry up to 3 times — guards against Render restarts during deploy
+          for attempt in 1 2 3; do
+            RESPONSE=$(curl -s -o response.json -w "%{http_code}" \
+              --max-time 200 \
+              -X POST "${{ secrets.RENDER_API_URL }}/api/admin/trigger-outcome" \
+              -H "X-API-Key: ${{ secrets.BOT_API_KEY }}" \
+              -H "Content-Type: application/json")
+            echo "Attempt $attempt: HTTP $RESPONSE"
+            if [ "$RESPONSE" = "200" ] || [ "$RESPONSE" = "500" ]; then
+              break  # 200 = success, 500 = JSON error from app (not Render restart)
+            fi
+            echo "Render not ready (HTTP $RESPONSE) — waiting 30s before retry..."
+            sleep 30
+          done
 
           echo "HTTP status: $RESPONSE"
           echo "=== Response ==="
