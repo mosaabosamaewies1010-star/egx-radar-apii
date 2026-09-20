@@ -210,6 +210,31 @@ def run_outcome_job(app) -> dict:
                     summary["scanned"] = len(pending_ids)
                     today = date.today()
 
+                    # Pre-fetch prices for all unique symbols in one pass.
+                    # Avoids calling yfinance N times for the same stock when it
+                    # has multiple PENDING opportunities (e.g. SRA A and SRA A+).
+                    from app.models.stock import Stock as _Stock
+                    unique_syms: list[str] = [
+                        row[0]
+                        for row in (
+                            db.session.query(_Stock.symbol)
+                            .join(Opportunity, Opportunity.stock_id == _Stock.id)
+                            .filter(Opportunity.id.in_(pending_ids))
+                            .distinct()
+                            .all()
+                        )
+                        if row[0]
+                    ]
+                    price_cache: dict[str, float | None] = {}
+                    for sym in unique_syms:
+                        price_cache[sym] = _fetch_last_close(sym)
+                    logger.info(
+                        "outcome_job: pre-fetched prices for %d unique symbols "
+                        "(%d had no price)",
+                        len(unique_syms),
+                        sum(1 for v in price_cache.values() if v is None),
+                    )
+
                     tp1_c = tp2_c = sl_c = timeout_c = 0
                     skipped_no_price = skipped_not_eligible = errors = closed = 0
 
@@ -247,7 +272,7 @@ def run_outcome_job(app) -> dict:
                                     continue
 
                                 sym        = opp.stock.symbol if opp.stock else "?"
-                                last_price = _fetch_last_close(sym)
+                                last_price = price_cache.get(sym, None)
 
                                 if last_price is None:
                                     skipped_no_price += 1
