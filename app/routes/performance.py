@@ -171,7 +171,7 @@ def oos_performance():
     for key, target in BACKTEST_TARGETS.items():
         sigs    = [s for s in all_signals if _engine_key(s.opp_type) == key]
         closed_ = [s for s in sigs if s.outcome in ("WIN", "LOSS", "EXPIRED")]
-        wins_   = [s for s in closed_ if s.outcome == "WIN"]
+        wins_   = [s for s in closed_ if _is_win(s)]
         by_engine[key] = {
             "label":             target["label"],
             "stars":             target["stars"],
@@ -197,9 +197,18 @@ def oos_performance():
     })
 
 
+def _is_win(s) -> bool:
+    """Canonical WIN rule: pnl > 0. Handles EXPIRED legacy records by pnl."""
+    if s.outcome == "WIN":
+        return True
+    if s.outcome == "EXPIRED":
+        return bool(s.pnl_pct and s.pnl_pct > 0)
+    return False
+
+
 def _live_pf(closed: list) -> float | None:
-    wins   = [s for s in closed if s.outcome == "WIN"]
-    losses = [s for s in closed if s.outcome in ("LOSS", "EXPIRED")]
+    wins   = [s for s in closed if _is_win(s)]
+    losses = [s for s in closed if not _is_win(s)]
     if not losses or not wins:
         return None
     gross_wins   = sum(s.pnl_pct for s in wins   if s.pnl_pct)
