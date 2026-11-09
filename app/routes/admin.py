@@ -461,6 +461,26 @@ def health_detail():
                 .limit(limit).all())
         items = [_opp_row(o) for o in rows]
 
+    elif kind == "sra_history":
+        days = min(int(request.args.get("days", 7)), 90)
+        since_dt = today - timedelta(days=days)
+        rows = (Opportunity.query
+                .filter(Opportunity.opp_type.like("SRA_%"),
+                        Opportunity.run_date >= since_dt)
+                .order_by(Opportunity.run_date.desc(), Opportunity.radar_score.desc())
+                .limit(limit).all())
+        items = [_opp_row(o) for o in rows]
+
+    elif kind == "trend_history":
+        days = min(int(request.args.get("days", 7)), 90)
+        since_dt = today - timedelta(days=days)
+        rows = (Opportunity.query
+                .filter(Opportunity.opp_type.like("TREND_%"),
+                        Opportunity.run_date >= since_dt)
+                .order_by(Opportunity.run_date.desc(), Opportunity.radar_score.desc())
+                .limit(limit).all())
+        items = [_opp_row(o) for o in rows]
+
     else:
         return jsonify({"error": f"unknown type '{kind}'"}), 400
 
